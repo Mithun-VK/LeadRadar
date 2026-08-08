@@ -20,6 +20,9 @@ import type {
   WebDiscoveryProvider,
 } from './contracts';
 import { MockAiProvider, MockDiscoveryProvider, MockWebDiscoveryProvider } from './mock/adapters';
+import { createProvider as createGooglePlaces } from './google-places/provider';
+import { createProvider as createFirecrawl } from './firecrawl/provider';
+import { createProvider as createGroq } from './groq/provider';
 
 export interface RegistryOverrides {
   readonly discovery?: BusinessDiscoveryProvider;
@@ -57,7 +60,11 @@ interface LiveAdapters {
   readonly ai?: () => AiProvider;
 }
 
-const LIVE_ADAPTERS: LiveAdapters = {};
+const LIVE_ADAPTERS: LiveAdapters = {
+  discovery: createGooglePlaces,
+  web: createFirecrawl,
+  ai: createGroq,
+};
 
 /**
  * Builds the live registry, or fails.
