@@ -1,14 +1,21 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    # Pinned to 16 for local development. Nothing in the schema or queries needs
+    # 17, and 16-alpine is far more likely to be cached already. Production can
+    # run any supported major version — override with POSTGRES_IMAGE if you want
+    # to match your deployment target exactly.
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     container_name: leadradar-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: leadradar
       POSTGRES_PASSWORD: leadradar
       POSTGRES_DB: leadradar
+    # Host port is 5433 by default, not 5432: a developer machine very often
+    # already runs a local PostgreSQL on 5432, and a second listener on the same
+    # port produces a confusing authentication failure rather than a bind error.
     ports:
-      - '5432:5432'
+      - '${POSTGRES_PORT:-5433}:5432'
     volumes:
       - leadradar-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -24,8 +31,9 @@ services:
     # BullMQ requires keyspace eviction to be disabled: evicting queue keys
     # silently loses jobs. maxmemory-policy noeviction is mandatory, not a tuning choice.
     command: redis-server --appendonly yes --maxmemory-policy noeviction
+    # 6380 for the same reason as Postgres above.
     ports:
-      - '6379:6379'
+      - '${REDIS_PORT:-6380}:6379'
     volumes:
       - leadradar-redisdata:/data
     healthcheck:
