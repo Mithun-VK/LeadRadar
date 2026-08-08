@@ -22,8 +22,7 @@ import type { StructuredQuery } from '@/types/domain';
 
 import { MAX_SUBDIVISION_DEPTH, cellCountAtDepth, resolveCity } from './geography';
 
-/** Provider ceiling per paginated request. */
-const RESULTS_PER_PAGE = 20;
+/** Provider ceiling: at most 3 pages per cell before subdivision takes over. */
 const MAX_PAGES_PER_CELL = 3;
 
 export interface CostEstimate {

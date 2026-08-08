@@ -1,26 +1,106 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
+/**
+ * Design tokens.
+ *
+ * Defined on bare :root so the light palette always exists, then overridden for
+ * dark. A token whose only definition sits inside a media query has no value in
+ * the other mode.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f8fafc;
+  --surface: #ffffff;
+  --surface-muted: #f1f5f9;
+  --border: #e2e8f0;
+  --foreground: #0f172a;
+  --muted: #64748b;
+  --accent: #1d4ed8;
+  --accent-soft: #eff6ff;
+
+  /* Grade colours. Deliberately not a red-to-green ramp: a grade-D lead is not
+     an error, it is a lower-priority prospect. */
+  --grade-a-plus: #047857;
+  --grade-a: #0d9488;
+  --grade-b: #0369a1;
+  --grade-c: #b45309;
+  --grade-d: #64748b;
+
+  /* Provenance colours, used consistently wherever a source is labelled. */
+  --provenance-google: #b45309;
+  --provenance-web: #0369a1;
+  --provenance-derived: #6d28d9;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --background: #0b1120;
+    --surface: #111827;
+    --surface-muted: #1e2937;
+    --border: #1f2937;
+    --foreground: #f1f5f9;
+    --muted: #94a3b8;
+    --accent: #60a5fa;
+    --accent-soft: #172554;
+
+    --grade-a-plus: #34d399;
+    --grade-a: #2dd4bf;
+    --grade-b: #38bdf8;
+    --grade-c: #fbbf24;
+    --grade-d: #94a3b8;
+
+    --provenance-google: #fbbf24;
+    --provenance-web: #38bdf8;
+    --provenance-derived: #a78bfa;
+  }
+}
+
+:root[data-theme='dark'] {
+  --background: #0b1120;
+  --surface: #111827;
+  --surface-muted: #1e2937;
+  --border: #1f2937;
+  --foreground: #f1f5f9;
+  --muted: #94a3b8;
+  --accent: #60a5fa;
+  --accent-soft: #172554;
+
+  --grade-a-plus: #34d399;
+  --grade-a: #2dd4bf;
+  --grade-b: #38bdf8;
+  --grade-c: #fbbf24;
+  --grade-d: #94a3b8;
+
+  --provenance-google: #fbbf24;
+  --provenance-web: #38bdf8;
+  --provenance-derived: #a78bfa;
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-border-subtle: var(--border);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+html,
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /* System stack rather than a webfont: it avoids a build-time font fetch and a
+     render-blocking request, and this is a dense data tool where legibility
+     matters more than personality. */
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-feature-settings: 'tnum' 1; /* Tabular figures keep score columns aligned. */
+}
+
+/* Wide tables scroll inside their own container; the page body never scrolls
+   horizontally. */
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
 }
