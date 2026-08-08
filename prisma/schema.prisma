@@ -1,0 +1,243 @@
+// LeadRadar — database schema
+//
+// PHASE 1 SCOPE: tenancy root and operational/observability tables. The lead
+// domain (Business, PlaceIdentifier, GooglePlaceSnapshot, SearchJob,
+// WebsiteCandidate, WebsiteVerification, SocialProfile, AIAnalysis, LeadScore,
+// ExportJob) lands in Phase 2 as a second migration.
+//
+// Two structural decisions are made here and are expensive to change later, so
+// they are made now even though authentication and search do not exist yet:
+//
+// 1. TENANCY. Every business-owned row carries organizationId, non-null, as the
+//    leading column of its composite indexes. A single default organization is
+//    seeded so the app works before auth exists. Retrofitting tenancy onto a
+//    global-data schema means migrating every row and every query, which is why
+//    it is not deferred.
+//
+// 2. PROVENANCE. Google-derived data will live in its own table with an
+//    expiresAt column, separate from durable records — see
+//    docs/google-maps-compliance.md. Place IDs may be retained indefinitely;
+//    most other Places content may not. Encoding that split in the schema makes
+//    the retention boundary a structural fact rather than a convention someone
+//    forgets.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  /// Plan name drives quota and budget defaults; billing itself is V3.
+  plan      String   @default("free")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships Membership[]
+  projects    Project[]
+  apiUsage    ApiUsage[]
+  budgets     Budget[]
+  auditLogs   AuditLog[]
+  events      SystemEvent[]
+
+  @@map("organizations")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships Membership[]
+  auditLogs   AuditLog[]
+
+  @@map("users")
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+model Membership {
+  id             String     @id @default(cuid())
+  organizationId String
+  userId         String
+  role           MemberRole @default(MEMBER)
+  createdAt      DateTime   @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("memberships")
+}
+
+/// A workspace for grouping searches and lead lists. Present from Phase 1 so
+/// lead ownership never has to be re-parented later.
+model Project {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  description    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("projects")
+}
+
+// ---------------------------------------------------------------------------
+// Cost tracking
+// ---------------------------------------------------------------------------
+
+enum ApiProvider {
+  GOOGLE_PLACES
+  FIRECRAWL
+  GROQ
+}
+
+enum ApiCallStatus {
+  SUCCESS
+  FAILED
+  RATE_LIMITED
+  TIMEOUT
+  CACHED
+  SKIPPED_BUDGET
+}
+
+/// One row per outbound provider call. Written by the provider adapters
+/// themselves, because usage is part of their return type — there is no way to
+/// make a billable call without producing one of these.
+model ApiUsage {
+  id             String        @id @default(cuid())
+  organizationId String
+  provider       ApiProvider
+  /// e.g. 'text-search', 'scrape', 'chat.completions'
+  operation      String
+  /// Billable events (Google), credits (Firecrawl), or calls (Groq).
+  units          Int           @default(1)
+  /// Unit label, e.g. 'text-search:enterprise' or 'credits'. Kept as text so a
+  /// provider adding a SKU does not require a migration.
+  unitKind       String
+  /// Millionths of a USD. Integer, because summing sub-cent floats over a
+  /// 100,000-business job drifts visibly.
+  costMicros     Int           @default(0)
+  durationMs     Int
+  status         ApiCallStatus
+  /// Machine-readable error code from the AppError taxonomy, never a raw body.
+  errorCode      String?
+  inputTokens    Int?
+  outputTokens   Int?
+  /// True when a mock adapter served the call, so mock spend never pollutes
+  /// real cost reporting.
+  mocked         Boolean       @default(false)
+  /// Correlation ids, so a cost spike can be traced to the job that caused it.
+  requestId      String?
+  jobId          String?
+  searchJobId    String?
+  createdAt      DateTime      @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, provider, createdAt])
+  @@index([searchJobId])
+  @@map("api_usage")
+}
+
+enum BudgetScope {
+  JOB
+  DAILY
+  MONTHLY
+}
+
+/// Spend ceilings. Enforced atomically in Redis before each provider call; this
+/// table is the durable configuration and the audit record of exhaustion, not
+/// the hot-path counter.
+model Budget {
+  id             String      @id @default(cuid())
+  organizationId String
+  scope          BudgetScope
+  limitMicros    Int
+  /// Set when the ceiling was last hit, for the cost dashboard.
+  exhaustedAt    DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, scope])
+  @@map("budgets")
+}
+
+// ---------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------
+
+enum SystemEventLevel {
+  INFO
+  WARN
+  ERROR
+}
+
+/// Operationally significant events worth surfacing in the UI: budget
+/// exhaustion, queue pauses, provider outages. Distinct from logs, which are
+/// high-volume and ephemeral.
+model SystemEvent {
+  id             String           @id @default(cuid())
+  organizationId String?
+  level          SystemEventLevel
+  /// Stable machine code, e.g. 'BUDGET_EXHAUSTED', 'QUEUE_PAUSED'.
+  code           String
+  message        String
+  /// Structured detail. Must be pre-redacted; no secrets reach this column.
+  context        Json?
+  createdAt      DateTime         @default(now())
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([code, createdAt])
+  @@map("system_events")
+}
+
+/// Append-only record of who did what. Separate from SystemEvent because its
+/// retention and access rules differ: this is evidence, not telemetry.
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String?
+  /// e.g. 'search.created', 'export.downloaded', 'settings.updated'
+  action         String
+  resourceType   String
+  resourceId     String?
+  /// Redacted request metadata; never headers or credentials.
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, action, createdAt])
+  @@map("audit_logs")
+}
