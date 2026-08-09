@@ -3,6 +3,16 @@ import type { ReactNode } from 'react';
 
 import { env } from '@/lib/env';
 
+/**
+ * The dashboard is never statically prerendered.
+ *
+ * Every page here reads runtime configuration and tenant data. Prerendering would
+ * evaluate env() at BUILD time, where NODE_ENV is production and the production
+ * guards (mock mode rejected, ENCRYPTION_KEY required) correctly fire — failing the
+ * build for a page that was always going to be rendered per-request anyway.
+ */
+export const dynamic = 'force-dynamic';
+
 const NAV = [
   { href: '/dashboard', label: 'Overview' },
   { href: '/dashboard/search', label: 'Search' },

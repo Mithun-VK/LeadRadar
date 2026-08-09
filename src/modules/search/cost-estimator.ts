@@ -120,6 +120,45 @@ export function estimateSearchCost(
     );
   }
 
+  /**
+   * Nothing resolves, so nothing will run.
+   *
+   * Returned as a genuine zero rather than falling through: the downstream maths
+   * would otherwise still charge for the one query-parse call and report a
+   * non-zero cost for a search that cannot discover a single business. That is
+   * exactly the kind of small dishonesty that makes a cost estimate untrustworthy.
+   */
+  if (resolved.length === 0) {
+    warnings.push('No recognised locations, so this search would discover nothing.');
+    return {
+      estimatedBusinesses: 0,
+      estimatedQualifiedLeads: 0,
+      googleRequests: 0,
+      firecrawlCredits: 0,
+      firecrawlSearches: 0,
+      firecrawlScrapes: 0,
+      groqCalls: 0,
+      googleCostMicros: 0,
+      firecrawlCostMicros: 0,
+      groqCostMicros: 0,
+      totalCostMicros: 0,
+      costPerQualifiedLeadMicros: 0,
+      estimatedDurationSeconds: 0,
+      assumptions: {
+        cities: 0,
+        categories: query.categories.length,
+        cells: 0,
+        pagesPerCell: 0,
+        funnel,
+        firecrawlPlan: pricing.firecrawlPlan,
+        groqModel: pricing.groqModel,
+        googleSku: GOOGLE_SKUS[pricing.googleTextSearchSku].label,
+        unresolvedLocations: unresolved,
+      },
+      warnings,
+    };
+  }
+
   let googleRequests = 0;
   let cells = 0;
   let pagesPerCellTotal = 0;
@@ -203,9 +242,6 @@ export function estimateSearchCost(
     Math.max(googleSeconds, firecrawlSeconds, groqSeconds) * 1.3,
   );
 
-  if (resolved.length === 0) {
-    warnings.push('No recognised locations, so this search would discover nothing.');
-  }
   if (query.categories.length * resolved.length > 20) {
     warnings.push(
       `${query.categories.length} categories x ${resolved.length} cities is ${

@@ -173,7 +173,7 @@ export async function executeSearch(
       projectId: options.projectId ?? null,
       query,
     },
-    { jobId: `search:${job.id}` },
+    { jobId: `search~${job.id}` },
   );
 
   await recordAudit(tenant, {

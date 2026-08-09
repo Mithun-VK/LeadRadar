@@ -40,7 +40,7 @@ import type {
 import { structuredQuerySchema } from '@/schemas/query';
 import type { StructuredQuery } from '@/types/domain';
 
-import { MOCK_BUSINESSES, MOCK_CITIES, findMockBusinesses } from './fixtures';
+import { MOCK_BUSINESSES, MOCK_CITIES } from './fixtures';
 
 /** Provider ceiling: Text Search returns at most 20 per page, 60 in total. */
 const PAGE_SIZE = 20;
@@ -61,21 +61,43 @@ export class MockDiscoveryProvider implements BusinessDiscoveryProvider {
   async search(request: DiscoveryRequest): Promise<Result<WithUsage<DiscoveryPage>>> {
     const sku = GOOGLE_SKUS[DEFAULT_PRICING.googleTextSearchSku];
 
-    // The city is inferred from the restriction box so the mock exercises the
-    // same cell-based code path as the live provider.
-    const city = request.locationRestriction
-      ? MOCK_CITIES.find((candidate) => {
-          const b = request.locationRestriction!;
-          const cx = (candidate.bounds.west + candidate.bounds.east) / 2;
-          const cy = (candidate.bounds.south + candidate.bounds.north) / 2;
-          return cx >= b.west && cx <= b.east && cy >= b.south && cy <= b.north;
-        })?.name
-      : undefined;
+    /**
+     * Geographic filtering works the way `locationRestriction` actually works: a
+     * fixture is returned when ITS OWN coordinates fall inside the requested
+     * rectangle. Inferring a city from the box centre instead would break as soon
+     * as the planner subdivides, because a quadrant's centre is not the city's.
+     */
+    const box = request.locationRestriction ?? request.locationBias;
 
-    const matches = findMockBusinesses({
-      category: request.textQuery,
-      city,
-      minRating: request.minRating,
+    /**
+     * The live caller sends a natural query like "dental clinic in Chennai", so
+     * matching must be bidirectional: the fixture's category may be a substring of
+     * the query rather than the other way round.
+     */
+    const haystack = request.textQuery.toLowerCase();
+
+    const matches = MOCK_BUSINESSES.filter((business) => {
+      if (request.minRating !== undefined && (business.rating ?? 0) < request.minRating) {
+        return false;
+      }
+
+      const categoryMatches = business.categories.some((category) => {
+        const needle = category.toLowerCase();
+        return haystack.includes(needle) || needle.includes(haystack);
+      });
+      if (!categoryMatches) return false;
+
+      if (box && business.location) {
+        const { latitude, longitude } = business.location;
+        return (
+          latitude >= box.south &&
+          latitude <= box.north &&
+          longitude >= box.west &&
+          longitude <= box.east
+        );
+      }
+
+      return true;
     });
 
     const offset = request.pageToken ? Number.parseInt(request.pageToken, 10) : 0;

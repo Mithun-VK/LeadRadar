@@ -180,7 +180,7 @@ export function createWorker<T = unknown, R = unknown>(
             attemptsMade,
             failedAt: new Date().toISOString(),
           },
-          { jobId: `dlq:${name}:${job.id}` },
+          { jobId: `dlq~${name}~${job.id}` },
         )
         .catch((dlqError: unknown) => {
           // Log rather than throw: losing the DLQ write must not also crash the

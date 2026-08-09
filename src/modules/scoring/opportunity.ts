@@ -362,26 +362,48 @@ export function scoreOpportunity(
   const bestRealistic = 1.0 * 1.0 * (weights.reach.base + weights.reach.hasPhone + weights.reach.hasSocial);
   let score = Math.round((raw / bestRealistic) * 100);
 
-  const appliedCaps: string[] = [];
+  /**
+   * Caps encode commercial judgement the arithmetic cannot.
+   *
+   * The reason is recorded whenever the CONDITION holds, not only when the ceiling
+   * actually bites. A user looking at a business with no website at all and asking
+   * why it is not grade A needs the answer either way — "it only has 6 reviews" is
+   * the useful information, regardless of whether the clamp changed the number.
+   */
+  const applicable: Array<{ limit: number; reason: string }> = [];
 
-  if (input.businessStatus === 'CLOSED_PERMANENTLY' && score > caps.closedMaxScore) {
-    score = caps.closedMaxScore;
-    appliedCaps.push('Permanently closed: cannot buy anything');
+  if (input.businessStatus === 'CLOSED_PERMANENTLY') {
+    applicable.push({
+      limit: caps.closedMaxScore,
+      reason: 'Permanently closed: cannot buy anything',
+    });
   }
-  if ((input.reviewCount ?? 0) < caps.lowReviewThreshold && score > caps.lowReviewMaxScore) {
-    score = caps.lowReviewMaxScore;
-    appliedCaps.push(
-      `Fewer than ${caps.lowReviewThreshold} reviews: capped at grade C regardless of website gap, ` +
-        'because low customer volume usually means no budget',
-    );
+  if ((input.reviewCount ?? 0) < caps.lowReviewThreshold) {
+    applicable.push({
+      limit: caps.lowReviewMaxScore,
+      reason:
+        `Fewer than ${caps.lowReviewThreshold} reviews: capped at grade C regardless of the ` +
+        'website gap, because low customer volume usually means no budget',
+    });
   }
-  if (input.isChain && score > caps.chainMaxScore) {
-    score = caps.chainMaxScore;
-    appliedCaps.push('Chain or franchise outlet: purchasing decision sits with head office');
+  if (input.isChain) {
+    applicable.push({
+      limit: caps.chainMaxScore,
+      reason: 'Chain or franchise outlet: the purchasing decision sits with head office',
+    });
   }
-  if (input.identityVerification === 'UNVERIFIED' && score > caps.unverifiedMaxScore) {
-    score = caps.unverifiedMaxScore;
-    appliedCaps.push('Identity not independently verified: cannot reach the top band');
+  if (input.identityVerification === 'UNVERIFIED') {
+    applicable.push({
+      limit: caps.unverifiedMaxScore,
+      reason: 'Identity not independently verified: cannot reach the top band',
+    });
+  }
+
+  const appliedCaps = applicable.map((cap) => cap.reason);
+
+  // The tightest applicable ceiling wins.
+  for (const cap of applicable) {
+    score = Math.min(score, cap.limit);
   }
 
   score = Math.max(0, Math.min(100, score));

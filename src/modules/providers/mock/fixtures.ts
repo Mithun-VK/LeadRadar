@@ -234,9 +234,14 @@ function coordinatesFor(slug: string, city: MockCity): { latitude: number; longi
   for (const char of slug) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   const latSpan = city.bounds.north - city.bounds.south;
   const lngSpan = city.bounds.east - city.bounds.west;
+
+  // `>>>` not `>>`: a signed shift on a hash with the high bit set yields a
+  // negative number, and `negative % 1000` is negative — which placed fixtures
+  // OUTSIDE their own city's bounding box and made them invisible to any
+  // locationRestriction search.
   return {
     latitude: city.bounds.south + ((hash % 1000) / 1000) * latSpan,
-    longitude: city.bounds.west + (((hash >> 10) % 1000) / 1000) * lngSpan,
+    longitude: city.bounds.west + (((hash >>> 10) % 1000) / 1000) * lngSpan,
   };
 }
 

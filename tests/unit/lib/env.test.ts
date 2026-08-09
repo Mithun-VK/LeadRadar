@@ -51,6 +51,20 @@ describe('parseEnv — mock mode', () => {
     const env = parseEnv(baseEnv({ GOOGLE_MAPS_API_KEY: '' }));
     expect(env.GOOGLE_MAPS_API_KEY).toBeUndefined();
   });
+
+  /**
+   * The documented setup path is "copy .env.example, then npm run dev", and that
+   * file ships ENCRYPTION_KEY blank. An empty value must therefore normalise to
+   * absent rather than failing the hex pattern.
+   */
+  it('accepts a blank ENCRYPTION_KEY outside production, as .env.example ships it', () => {
+    const env = parseEnv(baseEnv({ ENCRYPTION_KEY: '' }));
+    expect(env.ENCRYPTION_KEY).toBeUndefined();
+  });
+
+  it('still rejects a non-empty but malformed ENCRYPTION_KEY', () => {
+    expect(() => parseEnv(baseEnv({ ENCRYPTION_KEY: 'not-hex' }))).toThrowError(/64 hex characters/);
+  });
 });
 
 describe('parseEnv — live mode requires credentials', () => {

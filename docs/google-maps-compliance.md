@@ -3,10 +3,7 @@
 **Status:** engineering guidance, not legal advice.
 
 This document records what the Google Maps Platform documentation says, how
-LeadRadar is built in response, and — importantly — where genuine uncertainty
-remains. It makes no claim that LeadRadar is compliant. That determination
-requires a lawyer reading the binding terms against your specific commercial
-use, and it should happen before you sell access to anyone.
+LeadRadar is built in response, and — importantly — where genuine uncertainty remains. It makes no claim that LeadRadar is compliant. That determination requires a lawyer reading the binding terms against your specific commercial use, and it should happen before you sell access to anyone.
 
 Last researched: **2026-08-08**. Google changes both pricing and terms without
 notice; re-verify before launch and on a schedule after it.
@@ -17,9 +14,7 @@ notice; re-verify before launch and on a schedule after it.
 
 ### 1.1 Place IDs are the exception
 
-The Places API documentation states that the place ID *"is exempt from the
-caching restrictions"* in the Google Maps Platform Terms of Service, and that
-place ID values may be stored indefinitely.
+The Places API documentation states that the place ID *"is exempt from the caching restrictions"* in the Google Maps Platform Terms of Service, and that place ID values may be stored indefinitely.
 
 Google also recommends refreshing place IDs older than roughly **12 months**,
 and notes this refresh is **free**: a Place Details request asking for only the

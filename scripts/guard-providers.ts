@@ -85,6 +85,9 @@ const RULES: readonly Rule[] = [
       'src/lib/env.ts',
       'scripts/guard-providers.ts',
       'tests/setup.ts',
+      // Test setup files exist precisely to populate the environment before
+      // env() is ever called, so they cannot go through env() themselves.
+      'tests/setup.integration.ts',
       'next.config.ts',
       'prisma/seed.ts',
     ],

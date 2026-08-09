@@ -65,3 +65,7 @@ next-env.d.ts
 .idea
 .vscode/*
 !.vscode/extensions.json
+
+# Runtime logs and local verification artefacts
+worker.log
+*.log

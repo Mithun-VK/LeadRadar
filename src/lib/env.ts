@@ -89,12 +89,20 @@ const schema = z
      * 32 bytes, hex-encoded. Required only in production; development and test
      * fall back to a well-known non-secret key so the app boots unconfigured.
      */
-    ENCRYPTION_KEY: z
-      .string()
-      .trim()
-      .regex(/^[0-9a-fA-F]{64}$/, 'ENCRYPTION_KEY must be 64 hex characters (32 bytes)')
-      .optional()
-      .transform((v) => (v === '' ? undefined : v)),
+    /**
+     * Preprocessed so an EMPTY value normalises to undefined BEFORE the regex
+     * runs. Ordering matters: with `.regex().optional()` an empty string fails
+     * the pattern rather than being treated as absent, which would break the
+     * documented "copy .env.example and run" path — the file ships this key blank.
+     */
+    ENCRYPTION_KEY: z.preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z
+        .string()
+        .trim()
+        .regex(/^[0-9a-fA-F]{64}$/, 'ENCRYPTION_KEY must be 64 hex characters (32 bytes)')
+        .optional(),
+    ),
 
     // --- observability ------------------------------------------------------
     LOG_LEVEL: z

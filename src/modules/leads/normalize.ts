@@ -86,6 +86,11 @@ export function normalizeBusinessName(raw: string): string {
     .replace(/\p{M}+/gu, '')
     .toLowerCase()
     .replace(/&/g, ' and ')
+    // Apostrophes are REMOVED rather than replaced with a space, so "Sharma's
+    // Dental" folds to "sharmas dental" and matches "Sharmas Dental". Replacing
+    // them would produce a stray one-character token that carries no identity and
+    // is then dropped, losing the possessive entirely.
+    .replace(/['’ʼ]/g, '')
     .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();

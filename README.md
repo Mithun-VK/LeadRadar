@@ -39,9 +39,15 @@ if any is missing — the app will not silently fall back to mock data.
 ## Verification
 
 ```bash
-npm run check        # provider guard + typecheck + lint + test
-npm run test:coverage
+npm run check              # provider guard + typecheck + lint + 330 unit tests
+npm run test:integration   # 15 tests against real PostgreSQL (needs docker compose up)
+npm run verify:pipeline     # drives a real search through the real queue end to end
 ```
+
+`verify:pipeline` is the one that proves the system rather than the logic: it parses
+a natural-language query, prices it, enqueues it, and waits for the worker to run
+discovery, filtering, enrichment, verification, and scoring against real PostgreSQL
+and Redis with mock providers. Start `npm run worker` first.
 
 `npm run guard:providers` enforces the project's hard rules: no Anthropic/Claude
 SDK as a runtime dependency, no hard-coded model ids, `process.env` read only in
@@ -80,6 +86,8 @@ Three facts shape every design decision, and all three are counter-intuitive:
 |---|---|
 | [docs/LEADRADAR_IMPLEMENTATION_PLAN.md](docs/LEADRADAR_IMPLEMENTATION_PLAN.md) | Repository assessment, target architecture, verified provider pricing, cost model and scenarios, phase plan |
 | [docs/google-maps-compliance.md](docs/google-maps-compliance.md) | Data-provenance classes, retention design, and the open legal questions |
+| [docs/security.md](docs/security.md) | Threat model, why prompt injection is contained rather than filtered, and what is deliberately not claimed |
+| [docs/deployment.md](docs/deployment.md) | Topology, the Redis co-location constraint, scaling path, and the pre-launch checklist |
 
 ## Stack
 
@@ -88,5 +96,21 @@ Tailwind 4 · Zod · Vitest. Groq is the only runtime AI provider.
 
 ## Status
 
-Phase 1 (foundation) in progress. See the phase table in the implementation plan
-for what is built and what is next.
+All 13 phases implemented and verified end to end.
+
+| Check | Result |
+|---|---|
+| Provider guard | pass (92 files) |
+| Typecheck | pass |
+| Lint | pass, 0 warnings |
+| Unit tests | 330 passing |
+| Integration tests | 15 passing (real PostgreSQL) |
+| Production build | pass |
+| Runtime pipeline | all assertions pass |
+
+**Not yet implemented, and required before public exposure:** authentication.
+`resolveTenant` returns the seeded development organization. Every layer beneath it
+is already tenant-scoped, so this is a one-function replacement rather than a
+migration — but until it is done, do not expose this application to the internet.
+See [docs/security.md](docs/security.md) §4 and
+[docs/deployment.md](docs/deployment.md).

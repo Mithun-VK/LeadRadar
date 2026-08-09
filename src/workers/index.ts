@@ -38,14 +38,14 @@ async function scheduleMaintenance(): Promise<void> {
   await queue.add(
     'purge-google-snapshots',
     { task: 'purge-google-snapshots', limit: 5_000 },
-    { repeat: { pattern: '17 * * * *' }, jobId: 'repeat:purge-google-snapshots' },
+    { repeat: { pattern: '17 * * * *' }, jobId: 'repeat~purge-google-snapshots' },
   );
 
   // Place ID refresh: daily, off-peak. Free on the IDs-only SKU.
   await queue.add(
     'refresh-place-ids',
     { task: 'refresh-place-ids', limit: 500 },
-    { repeat: { pattern: '0 3 * * *' }, jobId: 'repeat:refresh-place-ids' },
+    { repeat: { pattern: '0 3 * * *' }, jobId: 'repeat~refresh-place-ids' },
   );
 }
 
