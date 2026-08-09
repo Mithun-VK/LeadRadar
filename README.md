@@ -41,7 +41,7 @@ if any is missing — the app will not silently fall back to mock data.
 ```bash
 npm run check              # provider guard + typecheck + lint + 330 unit tests
 npm run test:integration   # 15 tests against real PostgreSQL (needs docker compose up)
-npm run verify:pipeline     # drives a real search through the real queue end to end
+npm run verify:pipeline    # drives a real search through the real queue end to end
 ```
 
 `verify:pipeline` is the one that proves the system rather than the logic: it parses
@@ -91,7 +91,7 @@ Three facts shape every design decision, and all three are counter-intuitive:
 
 ## Stack
 
-Next.js 16 (App Router) · TypeScript · PostgreSQL 17 + Prisma · Redis + BullMQ ·
+Next.js 16 (App Router) · TypeScript · PostgreSQL + Prisma · Redis + BullMQ ·
 Tailwind 4 · Zod · Vitest. Groq is the only runtime AI provider.
 
 ## Status
