@@ -1,7 +1,10 @@
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 
+import { UserMenu } from '@/components/auth/user-menu';
 import { env } from '@/lib/env';
+import { currentSession } from '@/modules/auth/session';
 
 /**
  * The dashboard is never statically prerendered.
@@ -22,7 +25,14 @@ const NAV = [
   { href: '/dashboard/settings', label: 'Settings' },
 ];
 
-export default function DashboardLayout({ children }: { children: ReactNode }) {
+export default async function DashboardLayout({ children }: { children: ReactNode }) {
+  /**
+   * The real gate. Middleware only checks that a cookie EXISTS; this validates it
+   * against the database, so a forged or revoked cookie gets no further than here.
+   */
+  const session = await currentSession();
+  if (!session) redirect('/login?next=/dashboard');
+
   // Read on the server; this layout is a server component so no secret crosses
   // the boundary — only the boolean.
   const mockMode = env().isMockMode;
@@ -52,14 +62,17 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             for real leads and calls them is the worst outcome this product can
             produce, so the banner is persistent rather than dismissible.
           */}
-          {mockMode && (
-            <span
-              className="ml-auto rounded-md border border-[var(--grade-c)] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--grade-c)]"
-              title="MOCK_EXTERNAL_APIS=true — all business data is fabricated sample data."
-            >
-              Mock data
-            </span>
-          )}
+          <div className="ml-auto flex items-center gap-3">
+            {mockMode && (
+              <span
+                className="rounded-md border border-[var(--grade-c)] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--grade-c)]"
+                title="MOCK_EXTERNAL_APIS=true — all business data is fabricated sample data."
+              >
+                Mock data
+              </span>
+            )}
+            <UserMenu email={session.email} role={session.role} />
+          </div>
         </div>
       </header>
 

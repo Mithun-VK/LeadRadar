@@ -48,19 +48,64 @@ model Organization {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
+  id    String  @id @default(cuid())
+  email String  @unique
+  name  String?
+
+  /// scrypt-derived, salt embedded. Null for a user provisioned before setting a
+  /// password (invite flow) — such an account cannot authenticate.
+  passwordHash String?
+
+  /// Consecutive failed sign-ins, reset on success. Drives lockout.
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  lastLoginAt      DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   memberships Membership[]
+  sessions    Session[]
   auditLogs   AuditLog[]
   searchJobs  SearchJob[]
   exportJobs  ExportJob[]
   leadNotes   LeadNote[]
 
   @@map("users")
+}
+
+/// An authenticated session.
+///
+/// The token is stored HASHED, never in plaintext: a database leak then yields no
+/// usable sessions, exactly as with passwords. The cookie carries the only copy of
+/// the real token.
+model Session {
+  id String @id @default(cuid())
+
+  userId String
+  /// The organization this session is acting for. Held on the session rather than
+  /// derived per request, so switching organizations is an explicit, audited act.
+  organizationId String
+
+  /// SHA-256 of the session token. Unique so a lookup is a single indexed read.
+  tokenHash String   @unique
+  expiresAt DateTime
+  /// Rolling activity, used to expire idle sessions ahead of absolute expiry.
+  lastSeenAt DateTime @default(now())
+
+  /// Coarse client fingerprint for the session list and anomaly review. The IP is
+  /// hashed: it is personal data and full retention is not needed to spot a change.
+  ipHash    String?
+  userAgent String?
+
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("sessions")
 }
 
 enum MemberRole {

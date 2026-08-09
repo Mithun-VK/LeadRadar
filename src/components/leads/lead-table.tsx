@@ -14,6 +14,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 
+import { api } from '@/lib/api-client';
+
 import {
   ConfidencePill,
   EmptyState,
@@ -88,8 +90,8 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
     if (searchJobId) params.set('searchJobId', searchJobId);
 
     try {
-      const response = await fetch(`/api/leads?${params.toString()}`);
-      if (response.ok) setData((await response.json()) as LeadsResponse);
+      const result = await api.get<LeadsResponse>(`/api/leads?${params.toString()}`);
+      if (result.ok && result.data) setData(result.data);
     } finally {
       setLoading(false);
     }

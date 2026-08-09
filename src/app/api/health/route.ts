@@ -1,9 +1,11 @@
 /**
  * GET /api/health
  *
- * Reports dependency health for a load balancer or uptime monitor. Deliberately
- * exposes no version, hostname, or configuration — a health endpoint is
- * unauthenticated, so it must not become a reconnaissance surface.
+ * Reports dependency health for a load balancer or uptime monitor.
+ *
+ * The one route that stays unauthenticated by necessity — a load balancer cannot
+ * sign in. It therefore exposes no version, hostname, or configuration: an
+ * unauthenticated endpoint must not become a reconnaissance surface.
  */
 import { NextResponse } from 'next/server';
 

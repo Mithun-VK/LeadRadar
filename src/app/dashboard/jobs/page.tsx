@@ -10,7 +10,7 @@ import Link from 'next/link';
 import { formatMicros } from '@/config/pricing';
 import { Card, EmptyState } from '@/components/ui/primitives';
 import { db } from '@/modules/database/client';
-import { resolveTenant } from '@/modules/api/handler';
+import { requireTenant } from '@/modules/auth/tenant';
 import { queueDepths } from '@/modules/jobs/queues';
 
 export const metadata = { title: 'Jobs — LeadRadar' };
@@ -26,7 +26,7 @@ const STATUS_COLOURS: Record<string, string> = {
 };
 
 export default async function JobsPage() {
-  const tenant = await resolveTenant(new Request('http://localhost/dashboard/jobs'));
+  const tenant = await requireTenant();
 
   const [jobs, queues] = await Promise.all([
     db().searchJob.findMany({

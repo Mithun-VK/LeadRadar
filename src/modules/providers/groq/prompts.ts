@@ -62,7 +62,10 @@ Return exactly this JSON shape:
 }
 
 Guidance:
-- "no website", "without a website", "missing website" -> GOOGLE_WEBSITE_NOT_LISTED.
+- Any phrasing meaning the business has no website -> GOOGLE_WEBSITE_NOT_LISTED.
+  This includes "no website", "does not have a website", "without a website",
+  "missing website", "website not listed on Maps", "no site listed". Users phrase
+  this many ways and missing it drops the most important filter in the product.
 - "independent", "local", "small", "non-chain" -> excludeChains true.
 - Omit a filter the user did not ask for; use null rather than inventing a default.
 - Prefer these known categories when one clearly fits: ${allowedCategories.slice(0, 40).join(', ')}.

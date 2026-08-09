@@ -13,6 +13,8 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 
+import { api } from '@/lib/api-client';
+
 import { Banner, Card } from '@/components/ui/primitives';
 
 interface ParsedQuery {
@@ -87,18 +89,13 @@ export function SearchForm() {
     setParsed(null);
 
     try {
-      const response = await fetch('/api/search/parse', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query: text }),
-      });
-      const data = (await response.json()) as ParseResponse;
+      const result = await api.post<ParseResponse>('/api/search/parse', { query: text });
 
-      if (!response.ok) {
-        setError(data.error?.message ?? 'That search could not be understood.');
+      if (!result.ok || !result.data) {
+        setError(result.error?.message ?? 'That search could not be understood.');
         return;
       }
-      setParsed(data);
+      setParsed(result.data);
     } catch {
       setError('Could not reach the server.');
     } finally {
@@ -112,24 +109,19 @@ export function SearchForm() {
     setError(null);
 
     try {
-      const response = await fetch('/api/search', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          rawQuery: text,
-          query: parsed.query,
-          // Echo the estimate we showed, so the server can refuse if it has
-          // materially changed since.
-          acknowledgedCostMicros: parsed.estimate.totalCostMicros,
-        }),
+      const result = await api.post<{ searchJobId: string }>('/api/search', {
+        rawQuery: text,
+        query: parsed.query,
+        // Echo the estimate we showed, so the server can refuse if it has
+        // materially changed since.
+        acknowledgedCostMicros: parsed.estimate.totalCostMicros,
       });
-      const data = (await response.json()) as { searchJobId?: string; error?: { message: string } };
 
-      if (!response.ok || !data.searchJobId) {
-        setError(data.error?.message ?? 'The search could not be started.');
+      if (!result.ok || !result.data?.searchJobId) {
+        setError(result.error?.message ?? 'The search could not be started.');
         return;
       }
-      router.push(`/dashboard/jobs?highlight=${data.searchJobId}`);
+      router.push(`/dashboard/jobs?highlight=${result.data.searchJobId}`);
     } catch {
       setError('Could not reach the server.');
     } finally {

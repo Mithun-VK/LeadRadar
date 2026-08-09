@@ -357,7 +357,22 @@ export class MockAiProvider implements AiProvider {
     const ratingMatch = /(?:rating|rated)\D{0,20}?(\d(?:\.\d)?)/.exec(lower);
     const reviewMatch = /(\d[\d,]*)\s*(?:\+\s*)?reviews?/.exec(lower);
 
-    const noWebsite = /no website|without a website|missing website|no site/.test(lower);
+    /**
+     * Website-absence phrasings.
+     *
+     * Broad on purpose. Users write this a dozen ways — "no website", "does not
+     * have a website", "without a website", "website not listed on maps" — and a
+     * missed match silently drops the single most important filter in the product,
+     * returning every business in four cities instead of the ones worth calling.
+     */
+    const noWebsite =
+      /\bno\s+(?:website|site|web\s?site)\b/.test(lower) ||
+      /(?:does\s?n(?:o|')?t|do\s?n(?:o|')?t|without|lacks?|missing|not)\s+(?:have\s+)?(?:a\s+)?(?:website|site|web\s?site)\b/.test(
+        lower,
+      ) ||
+      /\bwebsite\s+(?:is\s+)?not\s+listed\b/.test(lower) ||
+      /\bnot\s+listed\s+on\s+(?:google|maps)\b/.test(lower) ||
+      /\bwebsite\s*[:=]?\s*(?:none|nil|absent)\b/.test(lower);
 
     const candidate = {
       categories: categories.length > 0 ? categories : ['dental clinic'],

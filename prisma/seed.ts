@@ -8,7 +8,10 @@
  *
  * Idempotent: safe to run repeatedly against an existing database.
  */
+import { randomBytes } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
+
+import { hashPassword } from '../src/modules/auth/password';
 
 const prisma = new PrismaClient();
 
@@ -33,13 +36,25 @@ async function main(): Promise<void> {
     },
   });
 
+  /**
+   * Development password.
+   *
+   * Taken from SEED_PASSWORD when set, otherwise generated randomly and printed
+   * once. Deliberately NOT a fixed default like "password123": a known seeded
+   * credential is the kind of thing that survives into a staging deployment and
+   * becomes a real breach.
+   */
+  const seedPassword = process.env.SEED_PASSWORD ?? `dev-${randomBytes(9).toString('base64url')}`;
+  const generated = process.env.SEED_PASSWORD === undefined;
+
   const user = await prisma.user.upsert({
     where: { id: DEFAULT_USER_ID },
-    update: {},
+    update: { passwordHash: await hashPassword(seedPassword) },
     create: {
       id: DEFAULT_USER_ID,
       email: 'dev@leadradar.local',
       name: 'Development User',
+      passwordHash: await hashPassword(seedPassword),
     },
   });
 
@@ -77,6 +92,16 @@ async function main(): Promise<void> {
     `Seeded organization ${organization.slug} (${organization.id}) ` +
       `with owner ${user.email} and default project.`,
   );
+  console.log('');
+  console.log('  Sign in at /login');
+  console.log(`    email:    ${user.email}`);
+  console.log(`    password: ${seedPassword}`);
+  if (generated) {
+    console.log('');
+    console.log('  This password was generated and is shown only now.');
+    console.log('  Set SEED_PASSWORD to choose your own before re-seeding.');
+  }
+  console.log('');
 }
 
 main()

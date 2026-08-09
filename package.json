@@ -31,7 +31,9 @@
     "db:reset": "prisma migrate reset --force",
     "guard:providers": "tsx scripts/guard-providers.ts",
     "check": "npm run guard:providers && npm run typecheck && npm run lint && npm run test",
-    "verify:pipeline": "tsx scripts/verify-pipeline.ts"
+    "verify:pipeline": "tsx scripts/verify-pipeline.ts",
+    "calibrate": "tsx scripts/calibrate-funnel.ts",
+    "verify:query": "tsx scripts/verify-user-query.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

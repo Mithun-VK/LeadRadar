@@ -15,7 +15,7 @@ import { notFound } from 'next/navigation';
 
 import { Card, GradeBadge, PresenceMeter, ProvenanceBadge, Stat, websiteLabel } from '@/components/ui/primitives';
 import { getBusiness } from '@/modules/database/repositories';
-import { resolveTenant } from '@/modules/api/handler';
+import { requireTenant } from '@/modules/auth/tenant';
 import { priorityLabel } from '@/modules/scoring/config';
 import { isAppError } from '@/lib/errors';
 
@@ -38,7 +38,7 @@ interface EvidenceShape {
 export default async function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   // Server component, so this runs with the same tenant resolution as the API.
-  const tenant = await resolveTenant(new Request('http://localhost/dashboard'));
+  const tenant = await requireTenant();
 
   let lead;
   try {

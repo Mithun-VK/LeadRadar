@@ -16,26 +16,32 @@ import type { z } from 'zod';
 import { AppError, isAppError, toAppError } from '@/lib/errors';
 import { requestId as newRequestId } from '@/lib/ids';
 import { requestLogger } from '@/lib/logger';
+import { assertCsrf, assertSameOrigin } from '@/modules/auth/csrf';
+import { requireSession, type AuthenticatedSession } from '@/modules/auth/session';
 import type { TenantContext } from '@/modules/database/client';
 import { acquire } from '@/modules/providers/rate-limit';
 
 /**
- * Development tenant.
+ * Resolves the caller's tenant from their session.
  *
- * Authentication is not yet implemented, so requests resolve to the seeded
- * organization. Every downstream call is ALREADY tenant-scoped, so adding real auth
- * means replacing this function — not migrating data or rewriting queries. That is
- * the whole reason tenancy went in before auth.
+ * The organization comes from the SESSION ROW, never from a header, query parameter,
+ * or request body — any of which the client controls and could forge to read
+ * another tenant's leads.
+ *
+ * @throws AppError UNAUTHENTICATED
  */
-const DEV_ORGANIZATION_ID = 'org_leadradar_default';
-const DEV_USER_ID = 'user_leadradar_dev';
-
 export async function resolveTenant(request: Request): Promise<TenantContext> {
-  // Placeholder for session resolution. Deliberately not reading a tenant id from
-  // a header or query parameter: that would be a trivially forgeable
-  // cross-tenant read, which is worse than having no auth at all.
   void request;
-  return { organizationId: DEV_ORGANIZATION_ID, userId: DEV_USER_ID };
+  const session = await requireSession();
+  return {
+    organizationId: session.organizationId,
+    userId: session.userId,
+  };
+}
+
+/** Full session, for handlers that need the role or email as well as the tenant. */
+export async function resolveSession(): Promise<AuthenticatedSession> {
+  return requireSession();
 }
 
 export interface HandlerContext<TBody = unknown, TQuery = unknown> {
@@ -60,6 +66,19 @@ export interface HandlerOptions<TBody, TQuery> {
   readonly rateLimit?: { capacity: number; refillPerSecond: number };
   /** Recorded in the audit log when set. */
   readonly auditAction?: string;
+  /**
+   * Skips authentication. Only for genuinely public endpoints (sign-in, health).
+   * Off by default so a new route is protected unless someone deliberately opts
+   * out — the safe direction for a mistake.
+   */
+  readonly public?: boolean;
+  /** Skips CSRF. Only for endpoints that cannot have a session yet, i.e. sign-in. */
+  readonly skipCsrf?: boolean;
+}
+
+/** Hosts permitted as a cross-origin `Origin`, beyond the request's own host. */
+function allowedOrigins(): string[] {
+  return [];
 }
 
 function errorResponse(error: AppError, requestId: string): NextResponse {
@@ -112,7 +131,27 @@ export function handler<TBody = undefined, TQuery = undefined, TResult = unknown
     const log = requestLogger(requestId, { method: request.method, path: new URL(request.url).pathname });
 
     try {
-      const tenant = await resolveTenant(request);
+      // Origin check before anything else: a cross-origin mutation is refused
+      // outright, independent of tokens.
+      assertSameOrigin(request, allowedOrigins());
+
+      let tenant: TenantContext;
+      let sessionId: string | null = null;
+
+      if (options.public) {
+        // Public routes still need a tenant placeholder for rate limiting; they
+        // must not touch tenant data.
+        tenant = { organizationId: 'public', requestId };
+      } else {
+        const session = await requireSession();
+        tenant = { organizationId: session.organizationId, userId: session.userId, requestId };
+        sessionId = session.sessionId;
+
+        if (!options.skipCsrf) {
+          await assertCsrf(request, session.sessionId);
+        }
+      }
+      void sessionId;
 
       if (options.rateLimit) {
         const limited = await acquire({

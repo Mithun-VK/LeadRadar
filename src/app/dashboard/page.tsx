@@ -12,14 +12,14 @@ import { env } from '@/lib/env';
 import { Banner, Card, EmptyState, GradeBadge, Stat } from '@/components/ui/primitives';
 import { daysAgo } from '@/lib/time';
 import { db } from '@/modules/database/client';
-import { resolveTenant } from '@/modules/api/handler';
+import { requireTenant } from '@/modules/auth/tenant';
 import { usageSummary } from '@/modules/database/repositories';
 
 export const metadata = { title: 'Overview — LeadRadar' };
 export const dynamic = 'force-dynamic';
 
 export default async function OverviewPage() {
-  const tenant = await resolveTenant(new Request('http://localhost/dashboard'));
+  const tenant = await requireTenant();
   const since = await daysAgo(30);
 
   const [byGrade, totals, usage, recentJobs, events] = await Promise.all([

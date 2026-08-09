@@ -13,7 +13,7 @@ import { env } from '@/lib/env';
 import { Banner, Card, EmptyState, Stat } from '@/components/ui/primitives';
 import { daysAgo } from '@/lib/time';
 import { db } from '@/modules/database/client';
-import { resolveTenant } from '@/modules/api/handler';
+import { requireTenant } from '@/modules/auth/tenant';
 import { skuLabel, usageSummary } from '@/modules/database/repositories';
 import { currentSpend } from '@/modules/providers/rate-limit';
 
@@ -27,7 +27,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 export default async function UsagePage() {
-  const tenant = await resolveTenant(new Request('http://localhost/dashboard/usage'));
+  const tenant = await requireTenant();
   const config = env();
   const since = await daysAgo(30);
 
