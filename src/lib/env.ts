@@ -29,8 +29,7 @@ const booleanish = z
   .transform((v) => v === 'true' || v === '1' || v === 'yes');
 
 /** A positive integer bound, e.g. a per-job request ceiling. */
-const positiveInt = (fallback: number) =>
-  z.coerce.number().int().positive().default(fallback);
+const positiveInt = (fallback: number) => z.coerce.number().int().positive().default(fallback);
 
 /** A non-negative USD amount. */
 const usd = (fallback: number) => z.coerce.number().nonnegative().default(fallback);
@@ -71,6 +70,40 @@ const schema = z
      */
     GROQ_MODEL: z.string().trim().min(1).default('openai/gpt-oss-20b'),
     FIRECRAWL_API_KEY: optionalSecret,
+
+    // --- Gmail (outreach) ---------------------------------------------------
+    /**
+     * OAuth 2.0 client for sending on the operator's behalf.
+     *
+     * Optional at boot even in production: an operator may run LeadRadar purely
+     * as a prospecting tool and never connect a mailbox. The failure is raised
+     * when someone actually tries to connect Gmail, which is where it is
+     * actionable — refusing to boot the whole application over an unused
+     * optional feature would be worse.
+     */
+    GOOGLE_CLIENT_ID: optionalSecret,
+    GOOGLE_CLIENT_SECRET: optionalSecret,
+    GOOGLE_REDIRECT_URI: optionalSecret,
+
+    /**
+     * Master switch for outbound email.
+     *
+     * Off by default and deliberately so. Everything else in this product reads
+     * public data; this is the one subsystem that acts in the world on the
+     * operator's behalf and under their sending reputation. An operator must
+     * turn it on knowingly rather than discover it running.
+     */
+    EMAIL_SENDING_ENABLED: booleanish.default(false),
+
+    /** Organization-wide ceiling on messages per day, across all campaigns. */
+    EMAIL_DAILY_LIMIT: positiveInt(50),
+    /** Minimum seconds between sends. A burst is the fastest route to a spam label. */
+    EMAIL_MIN_DELAY_SECONDS: positiveInt(60),
+    /**
+     * Public origin used to build unsubscribe links. Must be reachable by
+     * recipients — a localhost link in a real email is a broken promise.
+     */
+    APP_PUBLIC_URL: z.string().trim().url().default('http://localhost:3000'),
 
     MOCK_EXTERNAL_APIS: booleanish.default(false),
 
@@ -159,6 +192,62 @@ const schema = z
         message: 'DAILY_BUDGET_USD cannot exceed MONTHLY_BUDGET_USD.',
       });
     }
+
+    /**
+     * Live sending needs a real OAuth client. Without one the connect flow would
+     * fail halfway through, after the operator had already granted consent at
+     * Google — a confusing place to discover a configuration error.
+     *
+     * Mock mode is exempt: it satisfies the same interface with an in-process
+     * sender that delivers nowhere, which is exactly how the whole outreach
+     * pipeline is exercised without credentials.
+     */
+    if (cfg.EMAIL_SENDING_ENABLED && !cfg.MOCK_EXTERNAL_APIS) {
+      const missing = (
+        [
+          ['GOOGLE_CLIENT_ID', cfg.GOOGLE_CLIENT_ID],
+          ['GOOGLE_CLIENT_SECRET', cfg.GOOGLE_CLIENT_SECRET],
+          ['GOOGLE_REDIRECT_URI', cfg.GOOGLE_REDIRECT_URI],
+        ] as const
+      ).filter(([, value]) => !value);
+
+      for (const [name] of missing) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [name],
+          message:
+            `${name} is required when EMAIL_SENDING_ENABLED=true. ` +
+            'Set EMAIL_SENDING_ENABLED=false to run without outbound email.',
+        });
+      }
+    }
+
+    /**
+     * A localhost unsubscribe link in a real email is unreachable by the
+     * recipient, which turns a compliance obligation into a dead link.
+     */
+    if (
+      cfg.NODE_ENV === 'production' &&
+      cfg.EMAIL_SENDING_ENABLED &&
+      /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(cfg.APP_PUBLIC_URL)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['APP_PUBLIC_URL'],
+        message:
+          'APP_PUBLIC_URL must be a publicly reachable URL when sending email — ' +
+          'recipients cannot open a localhost unsubscribe link.',
+      });
+    }
+
+    if (cfg.EMAIL_MIN_DELAY_SECONDS < 5) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['EMAIL_MIN_DELAY_SECONDS'],
+        message:
+          'EMAIL_MIN_DELAY_SECONDS below 5 sends faster than any human could, which reads as spam.',
+      });
+    }
   });
 
 export type Env = z.infer<typeof schema> & {
@@ -224,8 +313,9 @@ export function parseEnv(source: NodeJS.ProcessEnv = process.env): Env {
 
   assertNoPublicSecrets(
     source,
-    [cfg.GOOGLE_MAPS_API_KEY, cfg.GROQ_API_KEY, cfg.FIRECRAWL_API_KEY, cfg.ENCRYPTION_KEY]
-      .filter((v): v is string => typeof v === 'string' && v.length > 0),
+    [cfg.GOOGLE_MAPS_API_KEY, cfg.GROQ_API_KEY, cfg.FIRECRAWL_API_KEY, cfg.ENCRYPTION_KEY].filter(
+      (v): v is string => typeof v === 'string' && v.length > 0,
+    ),
   );
 
   return Object.freeze({

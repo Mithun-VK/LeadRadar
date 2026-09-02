@@ -94,9 +94,54 @@ export const exportPayloadSchema = z
 
 export type ExportPayload = z.infer<typeof exportPayloadSchema>;
 
+/**
+ * Sends one campaign email.
+ *
+ * Deliberately one lead per job rather than a batch. A batch job that fails
+ * halfway leaves an ambiguous "which of these forty were sent?" — and resolving
+ * that ambiguity wrongly means either a duplicate to a real person or a lead
+ * silently never contacted. One lead per job makes the unit of retry the same as
+ * the unit of delivery.
+ */
+export const sendEmailPayloadSchema = z
+  .object({
+    ...tenantFields,
+    campaignId: z.string().min(1),
+    businessId: z.string().min(1),
+  })
+  .strict();
+
+export type SendEmailPayload = z.infer<typeof sendEmailPayloadSchema>;
+
+/** Advances a running campaign: queues the next batch within its limits. */
+export const campaignTickPayloadSchema = z
+  .object({
+    ...tenantFields,
+    campaignId: z.string().min(1),
+  })
+  .strict();
+
+export type CampaignTickPayload = z.infer<typeof campaignTickPayloadSchema>;
+
+/** Synchronises one organization's connected mailbox. */
+export const inboxSyncPayloadSchema = z
+  .object({
+    ...tenantFields,
+    maxMessages: z.number().int().min(1).max(200).optional(),
+  })
+  .strict();
+
+export type InboxSyncPayload = z.infer<typeof inboxSyncPayloadSchema>;
+
 export const maintenancePayloadSchema = z
   .object({
-    task: z.enum(['purge-google-snapshots', 'refresh-place-ids']),
+    task: z.enum([
+      'purge-google-snapshots',
+      'refresh-place-ids',
+      'campaign-scheduler',
+      'inbox-sync',
+      'purge-email-bodies',
+    ]),
     limit: z.number().int().min(1).max(5_000).default(500),
   })
   .strict();

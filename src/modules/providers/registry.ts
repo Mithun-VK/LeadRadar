@@ -16,23 +16,32 @@ import { logger } from '@/lib/logger';
 import type {
   AiProvider,
   BusinessDiscoveryProvider,
+  EmailSendProvider,
   ProviderRegistry,
   WebDiscoveryProvider,
 } from './contracts';
 import { MockAiProvider, MockDiscoveryProvider, MockWebDiscoveryProvider } from './mock/adapters';
+import { MockEmailSendProvider } from './mock/email';
 import { createProvider as createGooglePlaces } from './google-places/provider';
 import { createProvider as createFirecrawl } from './firecrawl/provider';
 import { createProvider as createGroq } from './groq/provider';
+import { createProvider as createGmail } from './gmail/provider';
 
 export interface RegistryOverrides {
   readonly discovery?: BusinessDiscoveryProvider;
   readonly web?: WebDiscoveryProvider;
   readonly ai?: AiProvider;
+  readonly email?: EmailSendProvider;
 }
 
 /**
  * Builds the mock registry. Always available, needs no credentials, and is the
  * default in development and test.
+ *
+ * The email sender is always present here, unlike in the live registry: mock mode
+ * exists so the whole product is demonstrable, and an outreach pipeline that
+ * cannot be demonstrated without connecting a real mailbox would defeat that.
+ * Nothing it "sends" leaves the process.
  */
 export function createMockRegistry(overrides: RegistryOverrides = {}): ProviderRegistry {
   const model = env().GROQ_MODEL;
@@ -40,6 +49,7 @@ export function createMockRegistry(overrides: RegistryOverrides = {}): ProviderR
     discovery: overrides.discovery ?? new MockDiscoveryProvider(),
     web: overrides.web ?? new MockWebDiscoveryProvider(),
     ai: overrides.ai ?? new MockAiProvider(model),
+    email: overrides.email ?? new MockEmailSendProvider(),
     mode: 'mock',
   };
 }
@@ -95,7 +105,17 @@ function createLiveRegistry(overrides: RegistryOverrides): ProviderRegistry {
     });
   }
 
-  return { discovery, web, ai, mode: 'live' };
+  /**
+   * The email sender is constructed only when sending is explicitly enabled.
+   *
+   * Unlike the data providers, an absent email sender is a valid configuration
+   * rather than an error: an operator may use LeadRadar purely for prospecting.
+   * Null here means the send path refuses cleanly instead of an unconfigured
+   * adapter sitting in the registry waiting to be called.
+   */
+  const email = overrides.email ?? (env().EMAIL_SENDING_ENABLED ? createGmail() : null);
+
+  return { discovery, web, ai, email, mode: 'live' };
 }
 
 let cached: ProviderRegistry | undefined;
@@ -121,6 +141,7 @@ export function providers(overrides: RegistryOverrides = {}): ProviderRegistry {
         discovery: registry.discovery.name,
         web: registry.web.name,
         ai: registry.ai.name,
+        email: registry.email?.name ?? 'disabled',
         model: registry.ai.model,
       },
       'Provider registry initialised',

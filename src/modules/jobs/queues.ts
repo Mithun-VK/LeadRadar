@@ -12,7 +12,14 @@
  * rate limiter by queueing thousands of simultaneous waiters, and would spend the
  * budget faster than the guard can observe it.
  */
-import { Queue, QueueEvents, Worker, type JobsOptions, type Processor, type WorkerOptions } from 'bullmq';
+import {
+  Queue,
+  QueueEvents,
+  Worker,
+  type JobsOptions,
+  type Processor,
+  type WorkerOptions,
+} from 'bullmq';
 
 import { env } from '@/lib/env';
 import { logger } from '@/lib/logger';
@@ -27,6 +34,7 @@ export const QUEUE_NAMES = {
   groq: 'groq',
   scoring: 'scoring',
   export: 'export',
+  email: 'email',
   maintenance: 'maintenance',
 } as const;
 
@@ -66,24 +74,95 @@ export function policyFor(queue: QueueName): QueuePolicy {
   switch (queue) {
     case 'search':
       // One coordinator per search; the fan-out happens in child jobs.
-      return { attempts: 2, backoffMs: 2_000, timeoutMs: 300_000, concurrency: scaledConcurrency(3), keepCompleted: 200, keepFailed: 500 };
+      return {
+        attempts: 2,
+        backoffMs: 2_000,
+        timeoutMs: 300_000,
+        concurrency: scaledConcurrency(3),
+        keepCompleted: 200,
+        keepFailed: 500,
+      };
     case 'google-places':
-      return { attempts: 4, backoffMs: 1_500, timeoutMs: 60_000, concurrency: scaledConcurrency(4), keepCompleted: 100, keepFailed: 500 };
+      return {
+        attempts: 4,
+        backoffMs: 1_500,
+        timeoutMs: 60_000,
+        concurrency: scaledConcurrency(4),
+        keepCompleted: 100,
+        keepFailed: 500,
+      };
     case 'website-discovery':
     case 'website-verification':
     case 'firecrawl':
       // Web fetching is the slowest and most failure-prone stage; more retries,
       // longer timeouts, and concurrency capped by the Firecrawl plan.
-      return { attempts: 3, backoffMs: 3_000, timeoutMs: 120_000, concurrency: scaledConcurrency(6), keepCompleted: 100, keepFailed: 1_000 };
+      return {
+        attempts: 3,
+        backoffMs: 3_000,
+        timeoutMs: 120_000,
+        concurrency: scaledConcurrency(6),
+        keepCompleted: 100,
+        keepFailed: 1_000,
+      };
     case 'groq':
-      return { attempts: 3, backoffMs: 2_000, timeoutMs: 60_000, concurrency: scaledConcurrency(3), keepCompleted: 100, keepFailed: 500 };
+      return {
+        attempts: 3,
+        backoffMs: 2_000,
+        timeoutMs: 60_000,
+        concurrency: scaledConcurrency(3),
+        keepCompleted: 100,
+        keepFailed: 500,
+      };
     case 'scoring':
       // Pure computation: a failure is a bug, not bad luck.
-      return { attempts: 2, backoffMs: 500, timeoutMs: 30_000, concurrency: scaledConcurrency(8), keepCompleted: 100, keepFailed: 500 };
+      return {
+        attempts: 2,
+        backoffMs: 500,
+        timeoutMs: 30_000,
+        concurrency: scaledConcurrency(8),
+        keepCompleted: 100,
+        keepFailed: 500,
+      };
     case 'export':
-      return { attempts: 2, backoffMs: 2_000, timeoutMs: 300_000, concurrency: scaledConcurrency(2), keepCompleted: 100, keepFailed: 200 };
+      return {
+        attempts: 2,
+        backoffMs: 2_000,
+        timeoutMs: 300_000,
+        concurrency: scaledConcurrency(2),
+        keepCompleted: 100,
+        keepFailed: 200,
+      };
+    case 'email':
+      /**
+       * Concurrency ONE, always — never scaled from MAX_CONCURRENT_JOBS.
+       *
+       * Every other queue here fetches data; this one sends mail from a real
+       * person's mailbox. Parallel sending defeats the inter-message delay that
+       * makes a campaign look like correspondence rather than a blast, and it is
+       * the fastest way to trip Gmail's per-account rate limit — which does not
+       * merely slow the campaign, it can suspend sending outright.
+       *
+       * Retries are few and slow for the same reason: a message whose delivery
+       * status is unclear must not be re-sent eagerly at a real recipient. The
+       * backoff is a full minute rather than seconds.
+       */
+      return {
+        attempts: 3,
+        backoffMs: 60_000,
+        timeoutMs: 60_000,
+        concurrency: 1,
+        keepCompleted: 500,
+        keepFailed: 1_000,
+      };
     case 'maintenance':
-      return { attempts: 2, backoffMs: 10_000, timeoutMs: 300_000, concurrency: 1, keepCompleted: 50, keepFailed: 100 };
+      return {
+        attempts: 2,
+        backoffMs: 10_000,
+        timeoutMs: 300_000,
+        concurrency: 1,
+        keepCompleted: 50,
+        keepFailed: 100,
+      };
   }
 }
 
@@ -231,7 +310,13 @@ export async function queueDepths(): Promise<QueueDepth[]> {
   return Promise.all(
     names.map(async (name) => {
       const queue = getQueue(name);
-      const counts = await queue.getJobCounts('waiting', 'active', 'delayed', 'failed', 'completed');
+      const counts = await queue.getJobCounts(
+        'waiting',
+        'active',
+        'delayed',
+        'failed',
+        'completed',
+      );
       const [paused, deadLettered] = await Promise.all([
         queue.isPaused(),
         getDeadLetterQueue(name).getJobCountByTypes('waiting', 'completed'),

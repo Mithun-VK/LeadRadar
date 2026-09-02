@@ -13,7 +13,16 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
-import { Card, GradeBadge, PresenceMeter, ProvenanceBadge, Stat, websiteLabel } from '@/components/ui/primitives';
+import {
+  Card,
+  FlagChips,
+  GradeBadge,
+  PresenceMeter,
+  ProvenanceBadge,
+  ScoreBar,
+  Stat,
+  websiteLabel,
+} from '@/components/ui/primitives';
 import { getBusiness } from '@/modules/database/repositories';
 import { requireTenant } from '@/modules/auth/tenant';
 import { priorityLabel } from '@/modules/scoring/config';
@@ -35,6 +44,29 @@ interface EvidenceShape {
   detail: string;
 }
 
+interface FindingShape {
+  id: string;
+  category: string;
+  label: string;
+  points: number;
+  maxPoints: number;
+  rationale: string;
+}
+
+/** One analysis category as a labelled bar. */
+function ScoreRow({ label, value, max }: { label: string; value: number; max: number }) {
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-4 py-3">
+      <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted)]">
+        {label}
+      </div>
+      <div className="mt-1.5">
+        <ScoreBar value={value} max={max} label={`/${max}`} />
+      </div>
+    </div>
+  );
+}
+
 export default async function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   // Server component, so this runs with the same tenant resolution as the API.
@@ -51,7 +83,9 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
   const score = lead.leadScores[0];
   const signals = (score?.breakdown ?? []) as unknown as ScoreSignalShape[];
   const verification = lead.verifications[0];
-  const narrative = lead.aiAnalyses.find((analysis) => analysis.taskType === 'LEAD_NARRATIVE');
+  const narrative = lead.aiAnalyses.find((entry) => entry.taskType === 'LEAD_NARRATIVE');
+  const analysis = lead.websiteAnalyses[0];
+  const findings = (analysis?.findings ?? []) as unknown as FindingShape[];
 
   return (
     <div className="space-y-5">
@@ -77,7 +111,9 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
         <div className="flex items-center gap-3">
           <GradeBadge priority={lead.leadPriority} />
           <div className="text-right">
-            <div className="text-2xl font-semibold tabular-nums">{lead.opportunityScore ?? '—'}</div>
+            <div className="text-2xl font-semibold tabular-nums">
+              {lead.opportunityScore ?? '—'}
+            </div>
             <div className="text-[11px] text-[var(--muted)]">
               {lead.leadPriority ? `Grade ${priorityLabel(lead.leadPriority)}` : 'Not scored'}
             </div>
@@ -177,6 +213,103 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
           </div>
         </Card>
       </div>
+
+      {lead.opportunityFlags.length > 0 && (
+        <Card
+          title="Opportunities"
+          description="What is measurably wrong, and therefore what there is to talk about."
+        >
+          <FlagChips flags={lead.opportunityFlags} limit={20} />
+        </Card>
+      )}
+
+      {(lead.emailCandidates.length > 0 || lead.primaryEmail) && (
+        <Card
+          title="Contact addresses"
+          description="Found on pages LeadRadar had already fetched. Nothing here was guessed."
+        >
+          <ul className="space-y-2">
+            {lead.emailCandidates.map((candidate) => (
+              <li
+                key={candidate.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] px-4 py-2"
+              >
+                <div className="min-w-0">
+                  <a href={`mailto:${candidate.email}`} className="text-sm hover:underline">
+                    {candidate.email}
+                  </a>
+                  <div className="mt-0.5 text-[11px] text-[var(--muted)]">
+                    {candidate.matchesVerifiedDomain
+                      ? 'On the verified website domain'
+                      : 'On a different domain'}
+                    {candidate.isRoleAccount && ' · role account'}
+                    {candidate.foundOnUrl && ` · found on ${candidate.foundOnUrl}`}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <ProvenanceBadge provenance="PUBLIC_WEB" />
+                  <span className="text-xs tabular-nums text-[var(--muted)]">
+                    {(candidate.confidence * 100).toFixed(0)}%
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+
+          <p className="mt-3 text-[11px] text-[var(--muted)]">
+            Addresses are extracted from pages already fetched during verification, so they cost
+            nothing extra. LeadRadar never guesses addresses from name patterns — guessed addresses
+            bounce, and bounces damage your sending reputation for every future campaign.
+          </p>
+        </Card>
+      )}
+
+      {analysis && (
+        <Card
+          title="Website analysis"
+          description={`${analysis.domain} · analysed ${analysis.analyzedAt.toLocaleDateString('en-IN')} · analyzer ${analysis.analyzerVersion}`}
+        >
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <ScoreRow label="Overall" value={analysis.qualityScore} max={100} />
+            <ScoreRow label="SEO" value={analysis.seoScore} max={25} />
+            <ScoreRow label="Content" value={analysis.contentScore} max={25} />
+            <ScoreRow label="Mobile" value={analysis.mobileScore} max={20} />
+            <ScoreRow label="Trust" value={analysis.trustScore} max={15} />
+            <ScoreRow label="Security" value={analysis.securityScore} max={15} />
+          </div>
+
+          <div className="mt-4 rounded-lg border border-dashed border-[var(--border)] px-4 py-3">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-sm font-medium">Performance</span>
+              <ScoreBar value={null} notMeasuredHint={analysis.performanceNote ?? undefined} />
+            </div>
+            <p className="mt-1 text-[11px] text-[var(--muted)]">{analysis.performanceNote}</p>
+          </div>
+
+          <div className="mt-5">
+            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+              Findings
+            </h3>
+            <div className="table-scroll mt-2">
+              <table className="w-full min-w-[560px] text-sm">
+                <tbody>
+                  {findings.map((finding) => (
+                    <tr key={finding.id} className="border-b border-[var(--border)] last:border-0">
+                      <td className="px-2 py-2 align-top">{finding.label}</td>
+                      <td className="w-24 px-2 py-2 align-top tabular-nums text-[var(--muted)]">
+                        {finding.points}/{finding.maxPoints}
+                      </td>
+                      <td className="px-2 py-2 align-top text-xs text-[var(--muted)]">
+                        {finding.rationale}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {lead.recommendations.length > 0 && (
         <Card title="What to sell" description="Deterministic rules, ranked by fit and deal size.">
@@ -293,6 +426,75 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
           </ul>
         </Card>
       )}
+
+      {(lead.campaignLeads.length > 0 || lead.emailMessages.length > 0) && (
+        <Card
+          title="Outreach history"
+          description="Every campaign this lead was enrolled in, and every message actually sent."
+        >
+          {lead.campaignLeads.length > 0 && (
+            <ul className="space-y-2 text-sm">
+              {lead.campaignLeads.map((entry) => (
+                <li
+                  key={entry.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] px-3 py-2"
+                >
+                  <Link
+                    href={`/dashboard/campaigns/${entry.campaign.id}`}
+                    className="text-sm hover:underline"
+                  >
+                    {entry.campaign.name}
+                  </Link>
+                  <span className="flex items-center gap-2 text-[11px] text-[var(--muted)]">
+                    <span>{entry.status.toLowerCase()}</span>
+                    {entry.skipReason && <span>· {entry.skipReason.toLowerCase()}</span>}
+                    {entry.sentAt && <span>· {entry.sentAt.toLocaleDateString('en-IN')}</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {lead.emailMessages.length > 0 && (
+            <div className="mt-4">
+              <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+                Messages
+              </h3>
+              <ul className="mt-2 space-y-2">
+                {lead.emailMessages.map((message) => (
+                  <li
+                    key={message.id}
+                    className="rounded-lg border border-[var(--border)] px-3 py-2"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-sm">{message.subject}</span>
+                      <span className="text-[11px] text-[var(--muted)]">
+                        {message.status.toLowerCase()}
+                        {message.mocked && ' · mock'}
+                        {message.sentAt && ` · ${message.sentAt.toLocaleString('en-IN')}`}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-[var(--muted)]">to {message.toEmail}</p>
+                    {/*
+                      The body as actually sent, not a re-render of the current
+                      template. The template may have changed since; what this
+                      person received has not.
+                    */}
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-[11px] text-[var(--muted)]">
+                        Show what was sent
+                      </summary>
+                      <pre className="mt-2 whitespace-pre-wrap rounded bg-[var(--surface-muted)] p-3 font-sans text-xs leading-relaxed">
+                        {message.body}
+                      </pre>
+                    </details>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </Card>
+      )}
     </div>
   );
 }
@@ -300,7 +502,9 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
 function Row({ label, value }: { label: string; value: string | null }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted)]">{label}</dt>
+      <dt className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted)]">
+        {label}
+      </dt>
       <dd className="text-right">{value ?? '—'}</dd>
     </div>
   );

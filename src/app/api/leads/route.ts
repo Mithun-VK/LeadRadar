@@ -33,9 +33,12 @@ const querySchema = z
     digitalPresence: csv,
     priority: csv,
     service: csv,
+    flags: csv,
     minRating: z.coerce.number().min(0).max(5).optional(),
     minReviews: z.coerce.number().int().min(0).optional(),
     minScore: z.coerce.number().int().min(0).max(100).optional(),
+    maxWebsiteScore: z.coerce.number().int().min(0).max(100).optional(),
+    hasEmail: z.enum(['true', 'false']).optional(),
     excludeChains: z
       .enum(['true', 'false'])
       .optional()
@@ -68,6 +71,9 @@ export const GET = handler(
       ...(query.minRating !== undefined && { minRating: query.minRating }),
       ...(query.minReviews !== undefined && { minReviews: query.minReviews }),
       ...(query.minScore !== undefined && { minScore: query.minScore }),
+      ...(query.maxWebsiteScore !== undefined && { maxWebsiteScore: query.maxWebsiteScore }),
+      ...(query.hasEmail !== undefined && { hasEmail: query.hasEmail === 'true' }),
+      ...(query.flags && { flags: query.flags }),
       ...(query.excludeChains && { excludeChains: true }),
       ...(query.searchJobId && { searchJobId: query.searchJobId }),
       ...(query.search && { search: query.search }),
@@ -96,6 +102,11 @@ export const GET = handler(
         verifiedDomain: row.verifiedDomain,
         digitalPresence: row.digitalPresence,
         opportunityScore: row.opportunityScore,
+        websiteQualityScore: row.websiteQualityScore,
+        opportunityFlags: row.opportunityFlags,
+        // The address itself, not merely a boolean: an operator scanning the
+        // table for who to contact wants to see it.
+        primaryEmail: row.primaryEmail,
         leadPriority: row.leadPriority,
         priorityLabel: row.leadPriority ? priorityLabel(row.leadPriority) : null,
         identityVerification: row.identityVerification,

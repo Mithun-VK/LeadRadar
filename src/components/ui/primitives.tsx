@@ -34,9 +34,7 @@ export function Card({
         <header className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
           <div>
             {title && <h2 className="text-sm font-semibold tracking-tight">{title}</h2>}
-            {description && (
-              <p className="mt-1 text-xs text-[var(--muted)]">{description}</p>
-            )}
+            {description && <p className="mt-1 text-xs text-[var(--muted)]">{description}</p>}
           </div>
           {actions}
         </header>
@@ -137,8 +135,7 @@ export function PresenceMeter({ level }: { level: string | null }) {
             key={position}
             className="h-3 w-1 rounded-sm"
             style={{
-              backgroundColor:
-                position <= index ? 'var(--accent)' : 'var(--border)',
+              backgroundColor: position <= index ? 'var(--accent)' : 'var(--border)',
             }}
           />
         ))}
@@ -184,15 +181,7 @@ export function ConfidencePill({ value }: { value: number | null }) {
   );
 }
 
-export function Stat({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: ReactNode;
-  hint?: string;
-}) {
+export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
   return (
     <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-4 py-3">
       <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted)]">
@@ -201,6 +190,127 @@ export function Stat({
       <div className="mt-1 text-lg font-semibold tabular-nums">{value}</div>
       {hint && <div className="mt-0.5 text-[11px] text-[var(--muted)]">{hint}</div>}
     </div>
+  );
+}
+
+const FLAG_TEXT: Record<string, string> = {
+  NO_WEBSITE: 'No website',
+  DIRECTORY_LISTING_ONLY: 'Directory only',
+  WEBSITE_BROKEN: 'Site broken',
+  WEBSITE_PARKED: 'Site parked',
+  OUTDATED_WEBSITE: 'Outdated',
+  THIN_WEBSITE: 'Thin site',
+  FREE_HOSTING: 'Free hosting',
+  NO_HTTPS: 'No HTTPS',
+  MIXED_CONTENT: 'Insecure assets',
+  POOR_MOBILE: 'Poor mobile',
+  POOR_SEO: 'Poor SEO',
+  MISSING_META_DESCRIPTION: 'No meta desc',
+  MISSING_H1: 'No H1',
+  MISSING_ALT_TEXT: 'No alt text',
+  NO_STRUCTURED_DATA: 'No schema',
+  LOW_CONTENT_QUALITY: 'Thin content',
+  NO_CONTACT_EMAIL: 'No email',
+  NO_CONTACT_ROUTE: 'No contact page',
+  NO_BOOKING_FUNNEL: 'No booking',
+  NO_SOCIAL_MEDIA: 'No social',
+  LOW_REVIEW_COUNT: 'Few reviews',
+  DECLINING_RATING: 'Weak rating',
+};
+
+/** Flags that describe the prospect rather than a sellable gap. */
+const CAUTION_FLAGS = new Set(['LOW_REVIEW_COUNT', 'DECLINING_RATING']);
+
+/**
+ * Opportunity flags.
+ *
+ * Two visual classes rather than one, because the two kinds of flag mean opposite
+ * things to a salesperson: most are reasons to call, while a couple are reasons
+ * to be careful. Rendering "No HTTPS" and "Few reviews" identically would invite
+ * someone to pitch the second as an opportunity.
+ */
+export function FlagChips({ flags, limit = 3 }: { flags: readonly string[]; limit?: number }) {
+  if (flags.length === 0) return <span className="text-xs text-[var(--muted)]">—</span>;
+
+  const shown = flags.slice(0, limit);
+  const remaining = flags.length - shown.length;
+
+  return (
+    <span className="flex flex-wrap items-center gap-1">
+      {shown.map((flag) => {
+        const caution = CAUTION_FLAGS.has(flag);
+        return (
+          <span
+            key={flag}
+            className="inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium"
+            style={{
+              color: caution ? 'var(--grade-c)' : 'var(--accent)',
+              borderColor: caution ? 'var(--grade-c)' : 'var(--accent)',
+            }}
+            title={caution ? 'A caution about this prospect' : 'A sellable opportunity'}
+          >
+            {FLAG_TEXT[flag] ?? flag}
+          </span>
+        );
+      })}
+      {remaining > 0 && <span className="text-[10px] text-[var(--muted)]">+{remaining}</span>}
+    </span>
+  );
+}
+
+export function flagLabel(flag: string): string {
+  return FLAG_TEXT[flag] ?? flag;
+}
+
+/**
+ * A 0-100 score as a bar.
+ *
+ * Renders "not measured" for null rather than an empty bar, which would read as
+ * zero. The distinction is the whole point wherever this is used: a website with
+ * no performance measurement is not a website that scored nothing.
+ */
+export function ScoreBar({
+  value,
+  max = 100,
+  label,
+  notMeasuredHint,
+}: {
+  value: number | null;
+  max?: number;
+  label?: string;
+  notMeasuredHint?: string;
+}) {
+  if (value === null) {
+    return (
+      <span className="text-xs text-[var(--muted)]" title={notMeasuredHint}>
+        Not measured
+      </span>
+    );
+  }
+
+  const percent = Math.max(0, Math.min(100, Math.round((value / max) * 100)));
+  // Colour follows the band, but the number is always present — colour is a
+  // secondary cue, never the only one.
+  const colour =
+    percent >= 70 ? 'var(--grade-a)' : percent >= 40 ? 'var(--grade-c)' : 'var(--grade-d)';
+
+  return (
+    <span className="flex items-center gap-2">
+      <span
+        className="h-1.5 w-16 overflow-hidden rounded-full"
+        style={{ backgroundColor: 'var(--border)' }}
+        aria-hidden
+      >
+        <span
+          className="block h-full rounded-full"
+          style={{ width: `${percent}%`, backgroundColor: colour }}
+        />
+      </span>
+      <span className="tabular-nums text-xs">
+        {value}
+        {label ? <span className="text-[var(--muted)]">/{max}</span> : null}
+      </span>
+    </span>
   );
 }
 

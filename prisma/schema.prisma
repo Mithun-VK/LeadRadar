@@ -44,6 +44,20 @@ model Organization {
   exportJobs   ExportJob[]
   leadNotes    LeadNote[]
 
+  gmailAccounts    GmailAccount[]
+  emailTemplates   EmailTemplate[]
+  campaigns        Campaign[]
+  emailMessages    EmailMessage[]
+  suppressions     SuppressionEntry[]
+  settings         OrgSetting[]
+
+  activities       SalesActivity[]
+  deals            Deal[]
+  serviceOfferings ServiceOffering[]
+  meetings         Meeting[]
+  proposals        Proposal[]
+  conversations    EmailConversation[]
+
   @@map("organizations")
 }
 
@@ -70,6 +84,17 @@ model User {
   searchJobs  SearchJob[]
   exportJobs  ExportJob[]
   leadNotes   LeadNote[]
+
+  emailTemplates EmailTemplate[]
+  campaigns      Campaign[]
+
+  leadStatusChanges  LeadStatusHistory[]
+  dealStageChanges   DealStageHistory[]
+  activitiesAssigned SalesActivity[]     @relation("ActivityAssignee")
+  activitiesCreated  SalesActivity[]     @relation("ActivityCreator")
+  dealsOwned         Deal[]
+  meetingsOwned      Meeting[]
+  proposalsCreated   Proposal[]
 
   @@map("users")
 }
@@ -305,6 +330,42 @@ model Business {
   leadPriority         LeadPriorityDb?
   identityVerification VerificationLevelDb     @default(UNVERIFIED)
 
+  /// Named sales opportunities derived from the signals below (NO_WEBSITE,
+  /// POOR_SEO, ...). Denormalized onto the lead so the table can filter and
+  /// display them without joining every analysis row. Recomputed by scoring, so
+  /// it never drifts from the evidence.
+  opportunityFlags String[]
+
+  /// Best contact email found on the business's own site, denormalized from
+  /// EmailCandidate so "has email" is an indexed filter rather than a join.
+  /// Null means none found, NOT that none exists.
+  primaryEmail String?
+  /// Highest website quality score observed, 0-100. Denormalized for filtering.
+  websiteQualityScore Int?
+
+  /// Position in the commercial pipeline. Defaults to NEW; every subsequent
+  /// change is validated by a transition table and recorded in
+  /// LeadStatusHistory. Distinct from leadPriority, which grades QUALITY.
+  leadStatus LeadStatusDb @default(NEW)
+
+  /// Where this lead came from, for attribution. Defaults to WEB_DISCOVERY
+  /// because that is how every lead existing before this field was added arrived.
+  source    LeadSourceDb @default(WEB_DISCOVERY)
+  sourceUrl String?
+  /// The campaign that first produced this lead, where it came from one.
+  sourceCampaignId String?
+
+  /// First and most recent contact. Both null until an email is actually sent —
+  /// "we know about them" is not a touch.
+  firstTouchAt DateTime?
+  lastTouchAt  DateTime?
+  /// Most recent inbound message, so "who replied and went quiet" is answerable.
+  lastReplyAt  DateTime?
+
+  /// Set when a bounce or a provider rejection proves the address is undeliverable.
+  /// Distinct from suppression, which is about consent rather than validity.
+  emailInvalid Boolean @default(false)
+
   /// True when name/branding indicates a chain or franchise outlet. A negative
   /// signal: purchasing decisions happen at HQ, not at the location.
   isChain Boolean @default(false)
@@ -326,6 +387,17 @@ model Business {
   recommendations   ServiceRecommendation[]
   searchResults     SearchResult[]
   notes             LeadNote[]
+  emailCandidates   EmailCandidate[]
+  websiteAnalyses   WebsiteAnalysis[]
+  campaignLeads     CampaignLead[]
+  emailMessages     EmailMessage[]
+
+  statusHistory LeadStatusHistory[]
+  activities    SalesActivity[]
+  deals         Deal[]
+  meetings      Meeting[]
+  proposals     Proposal[]
+  conversations EmailConversation[]
 
   /// One row per business per tenant: tenants keep independent lead records and
   /// independent scores over the same underlying place.
@@ -334,8 +406,139 @@ model Business {
   @@index([organizationId, city, primaryCategory])
   @@index([organizationId, leadPriority])
   @@index([organizationId, enrichedAt])
+  @@index([organizationId, websiteQualityScore])
+  @@index([organizationId, leadStatus])
+  @@index([organizationId, source])
   @@index([normalizedName])
   @@map("businesses")
+}
+
+// ---------------------------------------------------------------------------
+// Contact discovery — independently gathered from the business's own site
+// ---------------------------------------------------------------------------
+
+/// How an email address was found. Provenance matters commercially and legally:
+/// an address published on the business's own contact page is a different thing
+/// from one a human typed into a CSV, and only the former is evidence the
+/// business intended to be contacted at it.
+///
+/// Deliberately absent: any PATTERN_GUESS source. Permutation guessing
+/// (first.last@domain) generates bounces, damages the sender's reputation, and
+/// is the behaviour that gets outreach tools blocklisted. There is no schema
+/// slot for it, so it cannot be added casually.
+enum EmailSourceDb {
+  PAGE_MAILTO
+  PAGE_TEXT
+  CONTACT_PAGE
+  MANUAL_IMPORT
+}
+
+model EmailCandidate {
+  id         String @id @default(cuid())
+  businessId String
+
+  /// Lowercased and trimmed. Uniqueness per business is enforced on this form.
+  email  String
+  domain String
+
+  source     EmailSourceDb
+  /// 0-1. Highest when the address sits on a domain we verified belongs to the
+  /// business and was published as a mailto: link.
+  confidence Float
+
+  /// info@, contact@, hello@ and similar. Marked rather than discarded: for a
+  /// small clinic a role account is frequently the only published address, and
+  /// it is entirely legitimate to write to.
+  isRoleAccount Boolean @default(false)
+  /// True when the email domain matches the business's verified website domain.
+  /// The strongest available signal that the address really belongs to them.
+  matchesVerifiedDomain Boolean @default(false)
+
+  /// The page it was found on, for auditability.
+  foundOnUrl String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, email])
+  @@index([businessId, confidence(sort: Desc)])
+  @@map("email_candidates")
+}
+
+// ---------------------------------------------------------------------------
+// Website analysis
+// ---------------------------------------------------------------------------
+
+/// A structured assessment of a verified website.
+///
+/// Every sub-score is derived ONLY from evidence present in the fetched
+/// document. `performanceScore` is nullable and normally null, because a single
+/// page fetch cannot honestly measure load performance or Core Web Vitals —
+/// presenting a guess as a measurement is precisely what destroys trust in a
+/// lead list. See docs/LEAD_SCORING.md.
+///
+/// Superseded rather than overwritten (`isCurrent`), so re-analysis after a
+/// redesign is visible as a change rather than silently replacing history.
+model WebsiteAnalysis {
+  id         String @id @default(cuid())
+  businessId String
+
+  url    String
+  domain String
+
+  /// Weighted total of the sub-scores below, 0-100.
+  qualityScore Int
+  seoScore     Int
+  mobileScore  Int
+  securityScore Int
+  contentScore Int
+  trustScore   Int
+  /// Null unless a real measurement was taken. Never estimated.
+  performanceScore Int?
+  /// Why performance is absent, shown in the UI instead of a fabricated number.
+  performanceNote  String?
+
+  // --- raw observations, kept so a score can be re-derived without re-fetching
+  httpsEnabled          Boolean
+  hasViewportMeta       Boolean
+  hasTitle              Boolean
+  titleLength           Int?
+  hasMetaDescription    Boolean
+  metaDescriptionLength Int?
+  h1Count               Int     @default(0)
+  imageCount            Int     @default(0)
+  imagesWithAlt         Int     @default(0)
+  hasStructuredData     Boolean @default(false)
+  hasCanonical          Boolean @default(false)
+  hasContactPage        Boolean @default(false)
+  hasBookingIndicator   Boolean @default(false)
+  hasResponsiveHints    Boolean @default(false)
+  internalLinkCount     Int     @default(0)
+  externalLinkCount     Int     @default(0)
+  contentLength         Int     @default(0)
+  /// Count of http:// subresources on an https page. Real, cheap, and a genuine
+  /// security defect rather than an inference.
+  mixedContentCount     Int     @default(0)
+  isThin                Boolean @default(false)
+  isParked              Boolean @default(false)
+  isFreeHosting         Boolean @default(false)
+
+  /// Per-check detail: id, label, points awarded out of possible, and rationale.
+  /// The UI renders this rather than re-deriving the reasoning.
+  findings Json
+
+  /// Bumps when the analyzer changes, so results recompute without re-fetching.
+  analyzerVersion String
+  isCurrent       Boolean  @default(true)
+  analyzedAt      DateTime @default(now())
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, isCurrent])
+  @@index([businessId, analyzedAt])
+  @@map("website_analyses")
 }
 
 // ---------------------------------------------------------------------------
@@ -700,6 +903,368 @@ model LeadNote {
 }
 
 // ---------------------------------------------------------------------------
+// Outreach — Gmail, templates, campaigns, messages, suppression
+//
+// This subsystem sends email on the operator's behalf. Three structural
+// safeguards live in the schema rather than in application code, because
+// application care is not a control:
+//
+//   1. CampaignLead is UNIQUE on (campaignId, businessId) — a lead cannot be
+//      enrolled in the same campaign twice, so it cannot be mailed twice.
+//   2. SuppressionEntry is UNIQUE on (organizationId, emailHash) and is
+//      consulted before every send, with no bypass parameter anywhere.
+//   3. EmailMessage records the exact rendered body that was sent, so what a
+//      recipient received is auditable after the template has changed.
+//
+// See docs/ARCHITECTURE_AUDIT.md §8.2 for why these are mandatory.
+// ---------------------------------------------------------------------------
+
+/// A connected Gmail account, holding OAuth tokens for sending.
+///
+/// The refresh token is stored ENCRYPTED (AES-256-GCM via ENCRYPTION_KEY), never
+/// in plaintext: it is a long-lived credential to a user's mailbox, and a
+/// database leak must not hand an attacker the ability to send as them. Access
+/// tokens are short-lived and also encrypted; neither ever reaches the browser.
+model GmailAccount {
+  id             String @id @default(cuid())
+  organizationId String
+
+  /// The Google account address that will appear as the sender.
+  emailAddress String
+  /// Display name used in the From header.
+  displayName  String?
+
+  /// AES-256-GCM ciphertext. Never selected into an API response.
+  refreshTokenCipher String
+  accessTokenCipher  String?
+  accessTokenExpiry  DateTime?
+
+  /// Scopes actually granted, so the app can detect a downgraded consent rather
+  /// than discovering it on the first send.
+  grantedScopes String[]
+
+  /// Set when Google rejects the refresh token (revoked, password change).
+  /// Sending stops rather than retrying a credential that will never work.
+  invalidatedAt   DateTime?
+  invalidatedCode String?
+
+  /// Rolling daily send counter, reset when sentCountDate rolls over. Gmail
+  /// enforces its own quota; this makes ours visible before theirs bites.
+  sentCountDate DateTime?
+  sentCountToday Int      @default(0)
+
+  connectedAt DateTime  @default(now())
+  lastUsedAt  DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  campaigns    Campaign[]
+  messages     EmailMessage[]
+
+  /// One connected mailbox per organization for now. Multi-mailbox rotation is a
+  /// deliverability feature that needs its own design.
+  @@unique([organizationId, emailAddress])
+  @@index([organizationId])
+  @@map("gmail_accounts")
+}
+
+model EmailTemplate {
+  id             String @id @default(cuid())
+  organizationId String
+  createdByUserId String?
+
+  name        String
+  description String?
+
+  /// Mustache-style {{variable}} placeholders. Rendered by a strict renderer
+  /// that refuses unknown variables rather than emitting an empty string — an
+  /// email reading "Hi  team," is worse than a failed render.
+  subject String
+  body    String
+
+  /// Variables the template actually references, extracted on save so the
+  /// campaign builder can warn about leads missing a required value.
+  variables String[]
+
+  isArchived Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy     User?          @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  campaigns     Campaign[]
+  campaignSteps CampaignStep[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, isArchived])
+  @@map("email_templates")
+}
+
+enum CampaignStatusDb {
+  DRAFT
+  READY
+  RUNNING
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+model Campaign {
+  id             String @id @default(cuid())
+  organizationId String
+  createdByUserId String?
+  templateId     String?
+  gmailAccountId String?
+
+  name        String
+  description String?
+  status      CampaignStatusDb @default(DRAFT)
+
+  /// Sender identity used in the From header, defaulting to the Gmail account.
+  senderName  String?
+  /// Signature values substituted into {{sender_name}} / {{company_name}}.
+  companyName String?
+
+  /// Hard per-day ceiling. Enforced in the worker before each send, not in the UI.
+  dailyLimit Int @default(50)
+  /// Seconds between sends. A burst of identical messages is the fastest route
+  /// to a spam classification.
+  delaySeconds Int @default(120)
+
+  /// Whether AI personalization runs per lead at queue time.
+  useAiPersonalization Boolean @default(false)
+
+  /// Rolling daily counter for dailyLimit, reset on date rollover.
+  sentCountDate  DateTime?
+  sentCountToday Int       @default(0)
+
+  /// Explicit activation is required; discovery never enrols or sends. Recorded
+  /// so the decision is auditable.
+  activatedAt       DateTime?
+  activatedByUserId String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?          @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  template     EmailTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  gmailAccount GmailAccount?  @relation(fields: [gmailAccountId], references: [id], onDelete: SetNull)
+
+  leads    CampaignLead[]
+  messages EmailMessage[]
+
+  steps         CampaignStep[]
+  conversations EmailConversation[]
+  deals         Deal[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@map("campaigns")
+}
+
+enum CampaignLeadStatusDb {
+  PENDING
+  SKIPPED
+  QUEUED
+  SENT
+  FAILED
+  REPLIED
+  UNSUBSCRIBED
+}
+
+/// Enrolment of one lead in one campaign.
+///
+/// The unique constraint on (campaignId, businessId) is the primary duplicate-send
+/// defence: enrolment is the only path to a message, and a lead cannot be
+/// enrolled twice.
+model CampaignLead {
+  id         String @id @default(cuid())
+  campaignId String
+  businessId String
+
+  status CampaignLeadStatusDb @default(PENDING)
+  /// Why this lead will not be mailed (suppressed, no email, invalid address).
+  /// Recorded at enrolment so the campaign review screen shows the real
+  /// deliverable count before activation rather than after.
+  skipReason String?
+
+  /// The address selected for this lead, frozen at enrolment.
+  resolvedEmail String?
+
+  /// Rendered preview, generated before activation so a human can review the
+  /// actual text rather than a template.
+  previewSubject String?
+  previewBody    String?
+
+  enrolledAt DateTime  @default(now())
+  queuedAt   DateTime?
+  sentAt     DateTime?
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, businessId])
+  @@index([campaignId, status])
+  @@index([businessId])
+  @@map("campaign_leads")
+}
+
+enum EmailStatusDb {
+  DRAFT
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+  BOUNCED
+  REPLIED
+  UNSUBSCRIBED
+}
+
+model EmailMessage {
+  id             String @id @default(cuid())
+  organizationId String
+  campaignId     String?
+  businessId     String?
+  gmailAccountId String?
+
+  toEmail   String
+  fromEmail String
+  subject   String
+  /// The exact body that was sent. Retained because the template may change and
+  /// "what did we actually send this person?" must remain answerable.
+  body      String
+
+  status EmailStatusDb @default(DRAFT)
+
+  /// Provider identifiers, for reconciliation and reply detection.
+  providerMessageId String?
+  providerThreadId  String?
+
+  /// RFC 5322 Message-ID we generated, so a reply can be correlated.
+  messageIdHeader String?
+
+  attempts    Int     @default(0)
+  lastError   String?
+  errorCode   String?
+
+  /// True when a mock sender handled this, so test and demo activity never
+  /// appears in real deliverability reporting.
+  mocked Boolean @default(false)
+
+  /// Opaque per-message token in the unsubscribe link. Random, not derived from
+  /// the address, so it cannot be enumerated or reversed.
+  unsubscribeToken String @unique
+
+  queuedAt DateTime?
+  sentAt   DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  campaign     Campaign?     @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  business     Business?     @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  gmailAccount GmailAccount? @relation(fields: [gmailAccountId], references: [id], onDelete: SetNull)
+  events       EmailEvent[]
+
+  @@index([organizationId, status, createdAt])
+  @@index([campaignId, status])
+  @@index([businessId])
+  @@map("email_messages")
+}
+
+enum EmailEventTypeDb {
+  QUEUED
+  SEND_ATTEMPTED
+  SENT
+  FAILED
+  BOUNCED
+  REPLIED
+  UNSUBSCRIBED
+  SUPPRESSED
+}
+
+/// Append-only history for a message. Separate from the status column because
+/// "currently SENT" and "was retried twice after a timeout" are different
+/// questions, and only the second explains a deliverability problem.
+model EmailEvent {
+  id        String @id @default(cuid())
+  messageId String
+
+  type    EmailEventTypeDb
+  detail  String?
+  context Json?
+
+  createdAt DateTime @default(now())
+
+  message EmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId, createdAt])
+  @@map("email_events")
+}
+
+enum SuppressionReasonDb {
+  UNSUBSCRIBED
+  BOUNCED
+  COMPLAINED
+  MANUAL
+  INVALID
+}
+
+/// Addresses that must never be mailed again.
+///
+/// The address is stored BOTH hashed (for the unique constraint and lookups) and
+/// in plaintext, because an operator must be able to see and manage their own
+/// suppression list — a list you cannot read is one you cannot honour when
+/// someone asks "am I on it?". The hash exists so the uniqueness check is a
+/// single indexed equality on a normalised value.
+model SuppressionEntry {
+  id             String @id @default(cuid())
+  organizationId String
+
+  email     String
+  /// SHA-256 of the normalised address.
+  emailHash String
+
+  reason SuppressionReasonDb
+  detail String?
+  /// The message that triggered it, where there was one.
+  sourceMessageId String?
+
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, emailHash])
+  @@index([organizationId, createdAt])
+  @@map("suppression_entries")
+}
+
+/// Non-financial, validated tenant preferences.
+///
+/// Spending limits, provider mode, and crawl ceilings are deliberately NOT here:
+/// they stay in environment configuration, because putting the budget guard
+/// behind a web form would place the strongest cost control behind the weakest
+/// boundary. See docs/ARCHITECTURE_AUDIT.md §8.4.
+model OrgSetting {
+  id             String @id @default(cuid())
+  organizationId String
+
+  key   String
+  value Json
+
+  updatedAt     DateTime @updatedAt
+  updatedByUserId String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+  @@map("org_settings")
+}
+
+// ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
@@ -863,4 +1428,532 @@ model AuditLog {
   @@index([organizationId, createdAt])
   @@index([organizationId, action, createdAt])
   @@map("audit_logs")
+}
+
+// ===========================================================================
+// CRM — lead lifecycle, activities, deals
+//
+// The distinction that governs this whole section: a LEAD is a business we know
+// about, and a DEAL is a commercial opportunity with that business. They have
+// separate lifecycles on purpose. One business can produce two deals a year
+// apart, and a lost deal does not make the lead worthless — collapsing them into
+// one status field would make both of those unrepresentable.
+// ===========================================================================
+
+/// Where a lead came from. Retained for attribution: "which source produces the
+/// most revenue?" is unanswerable without it, and it cannot be reconstructed
+/// after the fact.
+enum LeadSourceDb {
+  WEB_DISCOVERY
+  DIRECTORY
+  CSV_IMPORT
+  MANUAL
+  REFERRAL
+  CAMPAIGN
+}
+
+/// The lead's position in the commercial pipeline.
+///
+/// Distinct from `LeadPriorityDb`, which is a QUALITY grade (how good is this
+/// prospect), and from `CampaignLeadStatusDb`, which is per-enrolment. This is
+/// the answer to "where is this relationship". A lead can be grade A+ and status
+/// LOST; the two say different things and both are worth knowing.
+enum LeadStatusDb {
+  NEW
+  QUALIFIED
+  CONTACTED
+  REPLIED
+  SQL
+  MEETING
+  PROPOSAL
+  NEGOTIATION
+  WON
+  LOST
+  UNSUBSCRIBED
+}
+
+/// What caused a status change. Recorded because "the system moved this to
+/// CONTACTED" and "a human moved this to CONTACTED" are different claims, and an
+/// operator reviewing a pipeline needs to know which they are looking at.
+enum StatusChangeSourceDb {
+  SYSTEM
+  USER
+  EMAIL
+  AI
+  IMPORT
+}
+
+/// Append-only audit of every lead status change.
+///
+/// Separate from AuditLog, which records API actions: a status change can happen
+/// inside a worker with no request behind it, and the pipeline history must be
+/// readable without joining a general-purpose action log.
+model LeadStatusHistory {
+  id         String @id @default(cuid())
+  businessId String
+
+  /// Null for the initial row, where there is no previous state.
+  fromStatus LeadStatusDb?
+  toStatus   LeadStatusDb
+
+  /// Why. Free text, because the interesting reasons are specific:
+  /// "replied asking for pricing", not "changed".
+  reason String?
+  source StatusChangeSourceDb
+
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  business  Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy User?    @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, createdAt])
+  @@index([toStatus, createdAt])
+  @@map("lead_status_history")
+}
+
+enum ActivityTypeDb {
+  EMAIL
+  CALL
+  MEETING
+  NOTE
+  FOLLOW_UP
+  PROPOSAL
+  TASK
+}
+
+enum ActivityStatusDb {
+  OPEN
+  COMPLETED
+  CANCELLED
+}
+
+/// A unit of sales work against a lead.
+///
+/// Covers both things that HAPPENED (an email was sent, a call took place) and
+/// things that are DUE (follow up on Monday). One model rather than two because
+/// the lead timeline shows them interleaved, and a separate "task" table would
+/// mean merging two sorted lists in every view that matters.
+model SalesActivity {
+  id             String  @id @default(cuid())
+  organizationId String
+  businessId     String
+  dealId         String?
+
+  type        ActivityTypeDb
+  title       String
+  description String?
+  status      ActivityStatusDb @default(OPEN)
+
+  /// When this is due. Null for a record of something that already happened.
+  dueAt       DateTime?
+  completedAt DateTime?
+
+  /// Set when the system created this rather than a person — e.g. "respond to
+  /// pricing enquiry" raised automatically from a classified reply.
+  createdBySystem  Boolean @default(false)
+  assignedToUserId String?
+  createdByUserId  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  deal         Deal?        @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  assignedTo   User?        @relation("ActivityAssignee", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  createdBy    User?        @relation("ActivityCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status, dueAt])
+  @@index([businessId, createdAt])
+  @@index([dealId])
+  @@map("sales_activities")
+}
+
+/// Deal stages. Related to lead status but deliberately not identical — see the
+/// section comment above.
+enum DealStageDb {
+  QUALIFICATION
+  DISCOVERY
+  MEETING
+  PROPOSAL
+  NEGOTIATION
+  WON
+  LOST
+}
+
+model Deal {
+  id             String @id @default(cuid())
+  organizationId String
+  businessId     String
+
+  name  String
+  stage DealStageDb @default(QUALIFICATION)
+
+  /// Value in MINOR UNITS (paise, cents), as an integer.
+  ///
+  /// Never a float. Summing floating-point money across a pipeline drifts
+  /// visibly, and a pipeline total that disagrees with the sum of its rows is
+  /// the fastest way to lose trust in a revenue dashboard.
+  ///
+  /// Null means "not yet estimated" and must be rendered as unknown, never as
+  /// zero — a deal with no value entered is not a worthless deal.
+  valueMinor Int?
+  currency   String @default("INR")
+
+  /// 0-100. Defaulted from the stage but editable, because a salesperson's
+  /// judgement about a specific deal beats a stage average.
+  probability Int @default(10)
+
+  expectedCloseDate DateTime?
+  notes             String?
+
+  ownerUserId String?
+
+  /// Set when the deal reaches a terminal stage, so "how long did this take" is
+  /// answerable without walking the stage history.
+  closedAt DateTime?
+
+  /// Why a deal was lost. The most commercially useful field in this table.
+  lostReason String?
+
+  /// The campaign that produced this deal, where there was one. The link that
+  /// makes campaign-to-revenue attribution possible.
+  sourceCampaignId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  business       Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  owner          User?        @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+  sourceCampaign Campaign?    @relation(fields: [sourceCampaignId], references: [id], onDelete: SetNull)
+
+  activities   SalesActivity[]
+  stageHistory DealStageHistory[]
+  meetings     Meeting[]
+  proposals    Proposal[]
+
+  @@index([organizationId, stage])
+  @@index([organizationId, closedAt])
+  @@index([businessId])
+  @@index([sourceCampaignId])
+  @@map("deals")
+}
+
+/// Append-only stage history. The brief requires every stage change to be
+/// recorded; this is where drag-and-drop on the Kanban board lands.
+model DealStageHistory {
+  id     String @id @default(cuid())
+  dealId String
+
+  fromStage DealStageDb?
+  toStage   DealStageDb
+  reason    String?
+  source    StatusChangeSourceDb
+
+  /// Value at the moment of the change, so a pipeline can be reconstructed as it
+  /// stood on a past date rather than only as it looks now.
+  valueMinorAtChange Int?
+
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  deal      Deal  @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  createdBy User? @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([dealId, createdAt])
+  @@map("deal_stage_history")
+}
+
+/// A service the operator sells, with a price.
+///
+/// Configurable rather than hard-coded so an agency can price its own work.
+/// `ServiceOpportunityDb` remains the taxonomy the scoring engine reasons about;
+/// this is the commercial catalogue layered on top, linked by `opportunity`.
+model ServiceOffering {
+  id             String @id @default(cuid())
+  organizationId String
+
+  name        String
+  description String?
+
+  /// The scoring-engine opportunity this offering fulfils. Multiple offerings may
+  /// map to one opportunity (a basic and a premium website build).
+  opportunity ServiceOpportunityDb?
+
+  /// Minor units, as with Deal.valueMinor. Null means "quoted per engagement".
+  basePriceMinor Int?
+  currency       String @default("INR")
+
+  active Boolean @default(true)
+
+  /// Higher wins when several offerings match. Lets an operator steer which
+  /// service gets recommended without editing scoring rules.
+  priority Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, name])
+  @@index([organizationId, active, priority(sort: Desc)])
+  @@map("service_offerings")
+}
+
+// ===========================================================================
+// Meetings and proposals
+// ===========================================================================
+
+enum MeetingStatusDb {
+  SCHEDULED
+  COMPLETED
+  NO_SHOW
+  CANCELLED
+  RESCHEDULED
+}
+
+/// A scheduled conversation.
+///
+/// Deliberately NOT integrated with any calendar provider. The brief is explicit
+/// that no calendar integration should be invented, and a fake one would be worse
+/// than none: an operator who believes an invite was sent, when it was not, misses
+/// the meeting. `meetingUrl` is whatever link the operator pastes in, and
+/// `externalEventId` is reserved so a real Google Calendar sync can be added later
+/// without a migration.
+model Meeting {
+  id             String  @id @default(cuid())
+  organizationId String
+  businessId     String
+  dealId         String?
+
+  title           String
+  scheduledAt     DateTime
+  durationMinutes Int             @default(30)
+  meetingUrl      String?
+  status          MeetingStatusDb @default(SCHEDULED)
+  notes           String?
+
+  /// Reserved for a future calendar integration. Null today, always.
+  externalEventId String?
+
+  ownerUserId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  deal         Deal?        @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  owner        User?        @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, scheduledAt])
+  @@index([organizationId, status])
+  @@index([businessId])
+  @@map("meetings")
+}
+
+enum ProposalStatusDb {
+  DRAFT
+  SENT
+  VIEWED
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+/// A priced offer.
+///
+/// Explicitly NOT a contract. There is no signature, no acceptance token, and no
+/// legal binding — `ACCEPTED` records that a human told us the client accepted,
+/// not that the client executed anything. Building a signature flow would create
+/// the appearance of a binding agreement without any of the substance.
+///
+/// `VIEWED` is present in the status enum because the brief asks for it, but
+/// nothing sets it: view tracking needs a tracking pixel or a hosted proposal
+/// page, and neither exists. It is an operator-settable state, not a measurement.
+model Proposal {
+  id             String  @id @default(cuid())
+  organizationId String
+  businessId     String
+  dealId         String?
+
+  title       String
+  description String?
+
+  /// Minor units. See Deal.valueMinor.
+  amountMinor Int?
+  currency    String @default("INR")
+
+  status ProposalStatusDb @default(DRAFT)
+
+  /// Structured content, so a proposal can be re-rendered rather than only
+  /// stored as prose: scope lines, timeline, terms.
+  scope    Json?
+  timeline String?
+  terms    String?
+  notes    String?
+
+  validUntil DateTime?
+  sentAt     DateTime?
+
+  createdByUserId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  deal         Deal?        @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  createdBy    User?        @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+  @@index([businessId])
+  @@index([dealId])
+  @@map("proposals")
+}
+
+// ===========================================================================
+// Inbound email — conversations and intent
+// ===========================================================================
+
+enum EmailDirectionDb {
+  INBOUND
+  OUTBOUND
+}
+
+/// One message in a conversation with a lead.
+///
+/// ---------------------------------------------------------------------------
+/// RETENTION
+/// ---------------------------------------------------------------------------
+/// Reading a mailbox means seeing messages that have nothing to do with
+/// LeadRadar. Two rules bound what is kept:
+///
+///   1. Only messages on a thread WE started are stored at all. An unrelated
+///      email from the operator's accountant is never matched to a lead and never
+///      persisted.
+///   2. `bodyExpiresAt` is set on write and purged by the retention job. The
+///      classification outcome is durable; the raw body is not, because it is the
+///      part containing third-party personal data we have no continuing need for.
+///
+/// See docs/DATA_RETENTION.md.
+model EmailConversation {
+  id             String  @id @default(cuid())
+  organizationId String
+  businessId     String?
+  campaignId     String?
+
+  /// Provider thread id — the join key that makes a reply attributable.
+  threadId  String
+  /// Provider message id. Unique per organization so a re-sync is idempotent.
+  messageId String
+
+  direction EmailDirectionDb
+
+  fromEmail String
+  toEmail   String
+  subject   String?
+
+  /// Plain-text body, truncated. Null once the retention job has purged it.
+  body String?
+  /// When the body becomes purgeable. The row itself survives for attribution.
+  bodyExpiresAt DateTime?
+
+  receivedAt DateTime
+  createdAt  DateTime @default(now())
+
+  /// The outbound message this is a reply to, where it could be matched.
+  inReplyToMessageId String?
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  business     Business?         @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  campaign     Campaign?         @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  intent       EmailIntent?
+
+  @@unique([organizationId, messageId])
+  @@index([organizationId, receivedAt])
+  @@index([businessId, receivedAt])
+  @@index([threadId])
+  @@index([bodyExpiresAt])
+  @@map("email_conversations")
+}
+
+/// What a reply appears to be asking for.
+enum EmailIntentDb {
+  POSITIVE_INTEREST
+  MEETING_REQUEST
+  PRICE_REQUEST
+  QUESTION
+  FOLLOW_UP
+  NOT_INTERESTED
+  UNSUBSCRIBE
+  OUT_OF_OFFICE
+  BOUNCE
+  UNKNOWN
+}
+
+/// How an intent was determined.
+///
+/// The distinction is load-bearing. A DETERMINISTIC unsubscribe — the recipient
+/// used the unsubscribe link, or the message carries the standard headers — is
+/// evidence. An AI classification of "UNSUBSCRIBE" is an inference. Only the
+/// first may trigger the irreversible act of permanent suppression.
+enum IntentSourceDb {
+  DETERMINISTIC
+  AI
+}
+
+model EmailIntent {
+  id             String @id @default(cuid())
+  conversationId String @unique
+
+  intent     EmailIntentDb
+  confidence Float
+  source     IntentSourceDb
+  /// Quoted evidence from the message. Never a free-form claim.
+  reason     String?
+
+  /// The model that produced this, when it was AI. Null for deterministic.
+  model String?
+
+  /// True when the confidence cleared the bar to act automatically. Recorded so
+  /// "why did nothing happen on this reply?" is answerable.
+  actedOn Boolean @default(false)
+
+  classifiedAt DateTime @default(now())
+
+  conversation EmailConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([intent, classifiedAt])
+  @@map("email_intents")
+}
+
+/// One step in a multi-touch campaign sequence.
+///
+/// A campaign with no steps behaves exactly as before this table existed: a
+/// single send. That keeps every campaign built under the previous design valid.
+model CampaignStep {
+  id         String @id @default(cuid())
+  campaignId String
+
+  /// 1-based. Step 1 is the initial email.
+  stepNumber Int
+  /// Days after the PREVIOUS step, not after enrolment. Expressing it relatively
+  /// means inserting a step does not silently reschedule every later one.
+  delayDays  Int    @default(3)
+
+  templateId String?
+  active     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaign Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  template EmailTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@unique([campaignId, stepNumber])
+  @@index([campaignId, active])
+  @@map("campaign_steps")
 }

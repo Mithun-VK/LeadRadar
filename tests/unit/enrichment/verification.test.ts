@@ -31,6 +31,7 @@ function page(overrides: Partial<FetchedPage> = {}): FetchedPage {
     content:
       'Sri Krishna Dental Care is a family dental clinic in Anna Nagar, Chennai. ' +
       'Call +91 44 2815 1234 to book. 12 Second Avenue, Anna Nagar, Chennai, Tamil Nadu 600040.',
+    html: null,
     links: ['https://srikrishnadental.in/contact', 'https://srikrishnadental.in/about'],
     httpsEnabled: true,
     byteLength: 200,
@@ -144,7 +145,10 @@ describe('scoreDeterministic — inconclusive cases route to AI', () => {
   });
 
   it('returns UNKNOWN for an empty page rather than guessing a mismatch', () => {
-    const result = scoreDeterministic({ business, page: page({ content: '', title: null, description: null }) });
+    const result = scoreDeterministic({
+      business,
+      page: page({ content: '', title: null, description: null }),
+    });
 
     expect(result.disqualified).toBe('EMPTY_PAGE');
     // An empty page proves nothing either way; calling it a mismatch would be a

@@ -17,7 +17,12 @@ import { AppError } from '@/lib/errors';
 import { env } from '@/lib/env';
 import { providerLogger } from '@/lib/logger';
 import { err, ok, type Result } from '@/lib/result';
-import { parseJson, parseRetryAfter, requestWithRetry, statusToErrorCode } from '@/modules/providers/http';
+import {
+  parseJson,
+  parseRetryAfter,
+  requestWithRetry,
+  statusToErrorCode,
+} from '@/modules/providers/http';
 import { PROVIDER_LIMITS, acquireBlocking } from '@/modules/providers/rate-limit';
 import { validateExternalUrl } from '@/modules/security/url-guard';
 import type {
@@ -40,6 +45,13 @@ const BASE_URL = 'https://api.firecrawl.dev/v2';
  * a memory risk and a prompt-injection surface.
  */
 const MAX_CONTENT_CHARS = 40_000;
+/**
+ * Raw HTML ceiling. Higher than the markdown cap because markup is verbose and
+ * the analyzer needs `<head>`, but still bounded: a document larger than this is
+ * not going to yield different structural facts, and unbounded markup is a
+ * memory risk on a worker running many jobs concurrently.
+ */
+const MAX_HTML_CHARS = 400_000;
 const MAX_RESPONSE_BYTES = 3 * 1024 * 1024;
 
 function creditUsage(operation: 'search' | 'scrape', durationMs: number): UsageRecord {
@@ -61,9 +73,7 @@ export class FirecrawlProvider implements WebDiscoveryProvider {
 
   constructor(private readonly apiKey: string) {}
 
-  async search(
-    request: WebSearchRequest,
-  ): Promise<Result<WithUsage<readonly WebSearchResult[]>>> {
+  async search(request: WebSearchRequest): Promise<Result<WithUsage<readonly WebSearchResult[]>>> {
     await acquireBlocking({ key: this.name, ...PROVIDER_LIMITS.firecrawl! });
 
     const response = await requestWithRetry({
@@ -91,7 +101,9 @@ export class FirecrawlProvider implements WebDiscoveryProvider {
     const usage = [creditUsage('search', response.value.durationMs)];
 
     if (response.value.status !== 200) {
-      return err(this.mapError(response.value.status, response.value.text, response.value.headers, 'search'));
+      return err(
+        this.mapError(response.value.status, response.value.text, response.value.headers, 'search'),
+      );
     }
 
     const json = parseJson(response.value.text, { provider: this.name, operation: 'search' });
@@ -136,11 +148,18 @@ export class FirecrawlProvider implements WebDiscoveryProvider {
       headers: { authorization: `Bearer ${this.apiKey}` },
       body: {
         url: guarded.value.url.toString(),
-        // Markdown plus links is everything verification needs; screenshots and
-        // raw HTML would cost bandwidth for no decision value.
-        formats: ['markdown'],
-        onlyMainContent: true,
-        ...(request.includeLinks && { formats: ['markdown', 'links'] }),
+        // Formats are billed per page, not per format, so asking for html when
+        // analysis needs it costs no extra credits. Screenshots are still never
+        // requested — those carry no decision value here.
+        formats: [
+          'markdown',
+          ...(request.includeLinks ? ['links'] : []),
+          ...(request.includeHtml ? ['html'] : []),
+        ],
+        // Analysis needs the whole document: onlyMainContent strips <head>, and
+        // with it the viewport tag, canonical link, and structured data the
+        // analyzer exists to measure.
+        onlyMainContent: request.includeHtml !== true,
         timeout: request.timeoutMs ?? 20_000,
         // Skip the TLS-verified but dead pages quickly rather than waiting out a
         // full render on a parked domain.
@@ -156,7 +175,9 @@ export class FirecrawlProvider implements WebDiscoveryProvider {
     const usage = [creditUsage('scrape', response.value.durationMs)];
 
     if (response.value.status !== 200) {
-      return err(this.mapError(response.value.status, response.value.text, response.value.headers, 'scrape'));
+      return err(
+        this.mapError(response.value.status, response.value.text, response.value.headers, 'scrape'),
+      );
     }
 
     const json = parseJson(response.value.text, { provider: this.name, operation: 'scrape' });
@@ -184,7 +205,8 @@ export class FirecrawlProvider implements WebDiscoveryProvider {
       );
     }
 
-    const finalUrl = payload.metadata?.sourceURL ?? payload.metadata?.url ?? guarded.value.url.toString();
+    const finalUrl =
+      payload.metadata?.sourceURL ?? payload.metadata?.url ?? guarded.value.url.toString();
     const content = (payload.markdown ?? '').slice(0, MAX_CONTENT_CHARS);
 
     return ok({
@@ -196,6 +218,7 @@ export class FirecrawlProvider implements WebDiscoveryProvider {
         description: payload.metadata?.description ?? null,
         // UNTRUSTED. Never placed in an instruction channel; see the AI layer.
         content,
+        html: request.includeHtml ? (payload.html ?? '').slice(0, MAX_HTML_CHARS) || null : null,
         links: (payload.links ?? []).slice(0, 300),
         httpsEnabled: finalUrl.startsWith('https://'),
         byteLength: content.length,
@@ -215,7 +238,12 @@ export class FirecrawlProvider implements WebDiscoveryProvider {
       code: finalCode,
       message: `Firecrawl ${operation} failed with HTTP ${status}`,
       retryAfterSeconds: parseRetryAfter(headers),
-      context: { provider: this.name, operation, httpStatus: status, bodySnippet: text.slice(0, 200) },
+      context: {
+        provider: this.name,
+        operation,
+        httpStatus: status,
+        bodySnippet: text.slice(0, 200),
+      },
     });
   }
 }
@@ -231,4 +259,4 @@ export function createProvider(): WebDiscoveryProvider {
   return new FirecrawlProvider(key);
 }
 
-export { MAX_CONTENT_CHARS };
+export { MAX_CONTENT_CHARS, MAX_HTML_CHARS };

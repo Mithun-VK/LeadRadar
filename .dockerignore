@@ -1,0 +1,33 @@
+# Never copy these into the build context.
+#
+# .env first and for the obvious reason: a secret that reaches the build context
+# can end up in an image layer, and image layers get pushed to registries.
+.env
+.env.*
+!.env.example
+
+node_modules
+.next
+out
+build
+dist
+
+.git
+.github
+.vscode
+.idea
+
+*.log
+dev.log
+tsconfig.tsbuildinfo
+coverage
+.nyc_output
+
+# Tests and docs are not needed at runtime and only enlarge the context.
+tests
+docs
+*.md
+!README.md
+
+.DS_Store
+Thumbs.db

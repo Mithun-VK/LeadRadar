@@ -30,6 +30,8 @@ import {
   type RecordUsageInput,
 } from '@/modules/database/repositories';
 import { enrichBusiness, socialPlatformsOf } from '@/modules/enrichment/pipeline';
+import { selectPrimaryEmail } from '@/modules/enrichment/contacts';
+import { deriveOpportunityFlags, flagNames } from '@/modules/scoring/flags';
 import { providers } from '@/modules/providers/registry';
 import type { UsageRecord } from '@/modules/providers/contracts';
 import { reserveBudget, releaseBudget, settleBudget } from '@/modules/providers/rate-limit';
@@ -64,7 +66,11 @@ import {
   type SearchJobPayload,
 } from './schemas';
 
-function tenantOf(payload: { organizationId: string; userId?: string; requestId?: string }): TenantContext {
+function tenantOf(payload: {
+  organizationId: string;
+  userId?: string;
+  requestId?: string;
+}): TenantContext {
   return {
     organizationId: payload.organizationId,
     ...(payload.userId !== undefined && { userId: payload.userId }),
@@ -104,8 +110,14 @@ async function budgetChecks(tenant: TenantContext) {
   const fromDb = new Map(rows.map((row) => [row.scope, row.limitMicros]));
 
   return [
-    { scope: 'daily' as const, limitMicros: fromDb.get('DAILY') ?? usdToMicros(config.DAILY_BUDGET_USD) },
-    { scope: 'monthly' as const, limitMicros: fromDb.get('MONTHLY') ?? usdToMicros(config.MONTHLY_BUDGET_USD) },
+    {
+      scope: 'daily' as const,
+      limitMicros: fromDb.get('DAILY') ?? usdToMicros(config.DAILY_BUDGET_USD),
+    },
+    {
+      scope: 'monthly' as const,
+      limitMicros: fromDb.get('MONTHLY') ?? usdToMicros(config.MONTHLY_BUDGET_USD),
+    },
   ];
 }
 
@@ -120,7 +132,10 @@ async function budgetChecks(tenant: TenantContext) {
  * when a cell turns out to be saturated, because saturation is the only evidence
  * that a cell hides more businesses than one request can return.
  */
-export async function processSearch(raw: unknown, bullJobId?: string): Promise<{ enqueued: number }> {
+export async function processSearch(
+  raw: unknown,
+  bullJobId?: string,
+): Promise<{ enqueued: number }> {
   const payload = parsePayload<SearchJobPayload>(searchJobPayloadSchema, raw, QUEUE_NAMES.search);
   const log = jobLogger(bullJobId ?? payload.searchJobId, QUEUE_NAMES.search, {
     searchJobId: payload.searchJobId,
@@ -175,7 +190,10 @@ export async function processSearch(raw: unknown, bullJobId?: string): Promise<{
     }
   }
 
-  log.info({ cities: cities.length, categories: payload.query.categories.length, enqueued }, 'Search planned');
+  log.info(
+    { cities: cities.length, categories: payload.query.categories.length, enqueued },
+    'Search planned',
+  );
   return { enqueued };
 }
 
@@ -187,7 +205,11 @@ export async function processDiscover(
   raw: unknown,
   bullJobId?: string,
 ): Promise<{ discovered: number; passed: number; saturated: boolean }> {
-  const payload = parsePayload<DiscoverPayload>(discoverPayloadSchema, raw, QUEUE_NAMES.googlePlaces);
+  const payload = parsePayload<DiscoverPayload>(
+    discoverPayloadSchema,
+    raw,
+    QUEUE_NAMES.googlePlaces,
+  );
   const tenant = tenantOf(payload);
   const log = jobLogger(bullJobId ?? 'discover', QUEUE_NAMES.googlePlaces, {
     searchJobId: payload.searchJobId,
@@ -336,7 +358,14 @@ export async function processDiscover(
     for (const child of subdivide(cell)) {
       await googleQueue.add(
         'discover',
-        { ...payload, cellKey: child.cellKey, bounds: child.bounds, depth: child.depth, pageIndex: 0, pageToken: undefined },
+        {
+          ...payload,
+          cellKey: child.cellKey,
+          bounds: child.bounds,
+          depth: child.depth,
+          pageIndex: 0,
+          pageToken: undefined,
+        },
         { jobId: jobIds.discover(payload.searchJobId, child.cellKey, payload.category, 0) },
       );
     }
@@ -379,7 +408,11 @@ export async function processDiscover(
 // ---------------------------------------------------------------------------
 
 export async function processEnrich(raw: unknown, bullJobId?: string): Promise<{ status: string }> {
-  const payload = parsePayload<EnrichPayload>(enrichPayloadSchema, raw, QUEUE_NAMES.websiteDiscovery);
+  const payload = parsePayload<EnrichPayload>(
+    enrichPayloadSchema,
+    raw,
+    QUEUE_NAMES.websiteDiscovery,
+  );
   const tenant = tenantOf(payload);
   const log = jobLogger(bullJobId ?? 'enrich', QUEUE_NAMES.websiteDiscovery, {
     businessId: payload.businessId,
@@ -472,7 +505,10 @@ export async function processEnrich(raw: unknown, bullJobId?: string): Promise<{
     if (result.verification?.candidateDomain) {
       const candidateRow = await tx.websiteCandidate.findUnique({
         where: {
-          businessId_domain: { businessId: business.id, domain: result.verification.candidateDomain },
+          businessId_domain: {
+            businessId: business.id,
+            domain: result.verification.candidateDomain,
+          },
         },
         select: { id: true },
       });
@@ -518,6 +554,82 @@ export async function processEnrich(raw: unknown, bullJobId?: string): Promise<{
       });
     }
 
+    for (const email of result.emails) {
+      await tx.emailCandidate.upsert({
+        where: { businessId_email: { businessId: business.id, email: email.email } },
+        update: {
+          source: email.source,
+          confidence: email.confidence,
+          isRoleAccount: email.isRoleAccount,
+          matchesVerifiedDomain: email.matchesVerifiedDomain,
+          foundOnUrl: email.foundOnUrl,
+        },
+        create: {
+          businessId: business.id,
+          email: email.email,
+          domain: email.domain,
+          source: email.source,
+          confidence: email.confidence,
+          isRoleAccount: email.isRoleAccount,
+          matchesVerifiedDomain: email.matchesVerifiedDomain,
+          foundOnUrl: email.foundOnUrl,
+        },
+      });
+    }
+
+    if (result.websiteAnalysis) {
+      const analysis = result.websiteAnalysis;
+
+      // Superseded rather than overwritten, so a re-analysis after a redesign is
+      // visible as a change instead of silently replacing the history.
+      await tx.websiteAnalysis.updateMany({
+        where: { businessId: business.id, isCurrent: true },
+        data: { isCurrent: false },
+      });
+
+      await tx.websiteAnalysis.create({
+        data: {
+          businessId: business.id,
+          url: analysis.url,
+          domain: analysis.domain,
+          qualityScore: analysis.qualityScore,
+          seoScore: analysis.seoScore,
+          mobileScore: analysis.mobileScore,
+          securityScore: analysis.securityScore,
+          contentScore: analysis.contentScore,
+          trustScore: analysis.trustScore,
+          performanceScore: analysis.performanceScore,
+          performanceNote: analysis.performanceNote,
+          httpsEnabled: analysis.observations.httpsEnabled,
+          hasViewportMeta: analysis.observations.hasViewportMeta,
+          hasTitle: analysis.observations.hasTitle,
+          titleLength: analysis.observations.titleLength,
+          hasMetaDescription: analysis.observations.hasMetaDescription,
+          metaDescriptionLength: analysis.observations.metaDescriptionLength,
+          h1Count: analysis.observations.h1Count,
+          imageCount: analysis.observations.imageCount,
+          imagesWithAlt: analysis.observations.imagesWithAlt,
+          hasStructuredData: analysis.observations.hasStructuredData,
+          hasCanonical: analysis.observations.hasCanonical,
+          hasContactPage: analysis.observations.hasContactPage,
+          hasBookingIndicator: analysis.observations.hasBookingIndicator,
+          hasResponsiveHints: analysis.observations.hasResponsiveHints,
+          internalLinkCount: analysis.observations.internalLinkCount,
+          externalLinkCount: analysis.observations.externalLinkCount,
+          contentLength: analysis.observations.contentLength,
+          mixedContentCount: analysis.observations.mixedContentCount,
+          isThin: analysis.observations.isThin,
+          isParked: analysis.observations.isParked,
+          isFreeHosting: analysis.observations.isFreeHosting,
+          findings: analysis.findings as never,
+          analyzerVersion: analysis.analyzerVersion,
+          isCurrent: true,
+        },
+      });
+    }
+
+    const primary = selectPrimaryEmail(result.emails);
+
     await tx.business.update({
       where: { id: business.id },
       data: {
@@ -531,6 +643,8 @@ export async function processEnrich(raw: unknown, bullJobId?: string): Promise<{
             : result.verification?.status === 'PROBABLE_MATCH'
               ? 'PROBABLE'
               : 'UNVERIFIED',
+        primaryEmail: primary?.email ?? null,
+        websiteQualityScore: result.websiteAnalysis?.qualityScore ?? null,
         enrichedAt: new Date(),
       },
     });
@@ -581,7 +695,9 @@ export async function processScore(
 ): Promise<{ score: number; priority: string }> {
   const payload = parsePayload<ScorePayload>(scorePayloadSchema, raw, QUEUE_NAMES.scoring);
   const tenant = tenantOf(payload);
-  const log = jobLogger(bullJobId ?? 'score', QUEUE_NAMES.scoring, { businessId: payload.businessId });
+  const log = jobLogger(bullJobId ?? 'score', QUEUE_NAMES.scoring, {
+    businessId: payload.businessId,
+  });
 
   const business = await db().business.findFirst({
     where: { id: payload.businessId, organizationId: tenant.organizationId },
@@ -589,6 +705,8 @@ export async function processScore(
       socialProfiles: { select: { platform: true, status: true, confidence: true } },
       placeIdentifier: { select: { id: true } },
       websiteCandidates: { where: { status: 'ACCEPTED' }, take: 1 },
+      websiteAnalyses: { where: { isCurrent: true }, take: 1 },
+      emailCandidates: { orderBy: { confidence: 'desc' }, take: 1 },
     },
   });
 
@@ -602,23 +720,29 @@ export async function processScore(
   const velocity = await reviewVelocity(business.placeIdentifier.id);
 
   /**
-   * Website quality is re-derived from stored signals rather than re-fetched.
-   * Scoring must be free to re-run — that is the entire point of separating it
-   * from enrichment.
+   * Website quality comes from the STORED analysis, not from a re-fetch and not
+   * from assumed defaults.
+   *
+   * This previously substituted placeholder constants (2,000 characters, contact
+   * page present, not thin) for any lead with a verified website, which meant a
+   * meaningful part of every such score was fictional. Scoring still never
+   * re-fetches — that is what keeps a weights change free to re-run — but it now
+   * reads what enrichment actually measured.
    */
-  const websiteQuality =
-    business.independentWebsiteStatus === 'INDEPENDENT_WEBSITE_FOUND'
-      ? {
-          httpsEnabled: business.websiteCandidates[0]?.httpsEnabled ?? true,
-          isFreeHosting: false,
-          hasContactPage: true,
-          hasBookingIndicator: false,
-          contentLength: 2_000,
-          isThin: false,
-          isParked: false,
-          linkCount: 10,
-        }
-      : null;
+  const stored = business.websiteAnalyses[0] ?? null;
+
+  const websiteQuality = stored
+    ? {
+        httpsEnabled: stored.httpsEnabled,
+        isFreeHosting: stored.isFreeHosting,
+        hasContactPage: stored.hasContactPage,
+        hasBookingIndicator: stored.hasBookingIndicator,
+        contentLength: stored.contentLength,
+        isThin: stored.isThin,
+        isParked: stored.isParked,
+        linkCount: stored.internalLinkCount + stored.externalLinkCount,
+      }
+    : null;
 
   const platforms = socialPlatformsOf(
     business.socialProfiles.map((profile) => ({
@@ -656,6 +780,51 @@ export async function processScore(
     primaryCategory: business.primaryCategory,
   });
 
+  /**
+   * Flags are derived here, alongside the score, from the same evidence. Deriving
+   * them anywhere else would let a flag drift out of agreement with the score it
+   * sits next to, and a lead row that contradicts itself is worse than one with
+   * no flags at all.
+   */
+  const flagDetails = deriveOpportunityFlags({
+    googleWebsiteStatus: business.googleWebsiteStatus,
+    independentWebsiteStatus: business.independentWebsiteStatus,
+    observations: stored
+      ? {
+          httpsEnabled: stored.httpsEnabled,
+          hasViewportMeta: stored.hasViewportMeta,
+          hasTitle: stored.hasTitle,
+          titleLength: stored.titleLength,
+          hasMetaDescription: stored.hasMetaDescription,
+          metaDescriptionLength: stored.metaDescriptionLength,
+          h1Count: stored.h1Count,
+          imageCount: stored.imageCount,
+          imagesWithAlt: stored.imagesWithAlt,
+          hasStructuredData: stored.hasStructuredData,
+          hasCanonical: stored.hasCanonical,
+          hasContactPage: stored.hasContactPage,
+          hasBookingIndicator: stored.hasBookingIndicator,
+          hasResponsiveHints: stored.hasResponsiveHints,
+          internalLinkCount: stored.internalLinkCount,
+          externalLinkCount: stored.externalLinkCount,
+          contentLength: stored.contentLength,
+          mixedContentCount: stored.mixedContentCount,
+          isThin: stored.isThin,
+          isParked: stored.isParked,
+          isFreeHosting: stored.isFreeHosting,
+          pageBytes: 0,
+          scriptCount: 0,
+          htmlUnavailable: false,
+        }
+      : null,
+    seoScore: stored?.seoScore ?? null,
+    mobileScore: stored?.mobileScore ?? null,
+    hasEmail: business.emailCandidates.length > 0,
+    socialPlatformCount: platforms.length,
+    rating: business.rating,
+    reviewCount: business.reviewCount,
+  });
+
   await db().$transaction(async (tx) => {
     // Supersede rather than overwrite, so a weights change stays auditable.
     await tx.leadScore.updateMany({
@@ -678,7 +847,9 @@ export async function processScore(
       },
     });
 
-    await tx.serviceRecommendation.deleteMany({ where: { businessId: business.id, isCurrent: true } });
+    await tx.serviceRecommendation.deleteMany({
+      where: { businessId: business.id, isCurrent: true },
+    });
 
     for (const recommendation of recommendations) {
       await tx.serviceRecommendation.create({
@@ -698,6 +869,7 @@ export async function processScore(
         opportunityScore: score.total,
         leadPriority: score.priority,
         digitalPresence: score.digitalPresence,
+        opportunityFlags: flagNames(flagDetails),
       },
     });
   });
@@ -746,7 +918,10 @@ export async function processScore(
     }
   }
 
-  log.info({ score: score.total, priority: score.priority, caps: score.appliedCaps }, 'Lead scored');
+  log.info(
+    { score: score.total, priority: score.priority, caps: score.appliedCaps },
+    'Lead scored',
+  );
   return { score: score.total, priority: score.priority };
 }
 
@@ -769,7 +944,77 @@ export async function processMaintenance(
     raw,
     QUEUE_NAMES.maintenance,
   );
-  const log = jobLogger(bullJobId ?? 'maintenance', QUEUE_NAMES.maintenance, { task: payload.task });
+  const log = jobLogger(bullJobId ?? 'maintenance', QUEUE_NAMES.maintenance, {
+    task: payload.task,
+  });
+
+  if (payload.task === 'inbox-sync') {
+    /**
+     * Runs for every organization with a connected mailbox.
+     *
+     * One organization failing must not stop the others — a revoked grant on one
+     * tenant is an ordinary condition, not a reason to stop detecting replies
+     * everywhere else.
+     */
+    const { syncInbox } = await import('@/modules/email/inbox-sync');
+    const registry = providers();
+
+    if (!registry.email) return { task: payload.task, affected: 0 };
+
+    const accounts = await db().gmailAccount.findMany({
+      where: { invalidatedAt: null },
+      select: { organizationId: true },
+      distinct: ['organizationId'],
+      take: payload.limit,
+    });
+
+    let replies = 0;
+
+    for (const account of accounts) {
+      try {
+        const result = await syncInbox(
+          { organizationId: account.organizationId },
+          registry.email,
+          { ai: registry.ai },
+        );
+        replies += result.replies;
+      } catch (error) {
+        log.warn(
+          { err: error, organizationId: account.organizationId },
+          'Inbox sync failed for one organization; continuing',
+        );
+      }
+    }
+
+    if (replies > 0) log.info({ replies }, 'Replies detected');
+    return { task: payload.task, affected: replies };
+  }
+
+  if (payload.task === 'purge-email-bodies') {
+    const { purgeExpiredBodies } = await import('@/modules/email/inbox-sync');
+    const purged = await purgeExpiredBodies();
+
+    if (purged > 0) {
+      log.info({ purged }, 'Expired reply bodies purged');
+      await recordEvent({
+        level: 'INFO',
+        code: 'EMAIL_BODIES_PURGED',
+        message: `Purged ${purged} expired reply bodies.`,
+        context: { purged },
+      });
+    }
+
+    return { task: payload.task, affected: purged };
+  }
+
+  if (payload.task === 'campaign-scheduler') {
+    // Restarts send chains that a worker restart would otherwise leave stalled
+    // between messages.
+    const { resumeRunningCampaigns } = await import('@/modules/email/worker');
+    const outcome = await resumeRunningCampaigns();
+    if (outcome.resumed > 0) log.info(outcome, 'Resumed running campaigns');
+    return { task: payload.task, affected: outcome.resumed };
+  }
 
   if (payload.task === 'purge-google-snapshots') {
     const purged = await purgeExpiredGoogleSnapshots();

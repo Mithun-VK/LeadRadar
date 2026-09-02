@@ -14,9 +14,7 @@ const CSRF_HEADER = 'x-csrf-token';
 function csrfToken(): string | undefined {
   if (typeof document === 'undefined') return undefined;
 
-  const match = document.cookie
-    .split('; ')
-    .find((entry) => entry.startsWith(`${CSRF_COOKIE}=`));
+  const match = document.cookie.split('; ').find((entry) => entry.startsWith(`${CSRF_COOKIE}=`));
 
   return match ? decodeURIComponent(match.slice(CSRF_COOKIE.length + 1)) : undefined;
 }
@@ -34,7 +32,7 @@ export interface ApiResult<T> {
 }
 
 async function request<T>(
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   path: string,
   body?: unknown,
 ): Promise<ApiResult<T>> {
@@ -55,8 +53,7 @@ async function request<T>(
     });
 
     const payload = (await response.json().catch(() => ({}))) as
-      | (T & { error?: ApiError })
-      | { error?: ApiError };
+      (T & { error?: ApiError }) | { error?: ApiError };
 
     if (!response.ok) {
       // A 401 means the session expired while the page was open; send the user to
@@ -92,5 +89,8 @@ async function request<T>(
 export const api = {
   get: <T>(path: string) => request<T>('GET', path),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
-  delete: <T>(path: string) => request<T>('DELETE', path),
+  patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
+  // A body is permitted on DELETE here because several endpoints take a list of
+  // ids to remove, and a 1,000-id query string is not workable.
+  delete: <T>(path: string, body?: unknown) => request<T>('DELETE', path, body),
 };

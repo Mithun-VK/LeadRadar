@@ -67,7 +67,9 @@ export async function ensurePlaceIdentifier(
 }
 
 /** Place IDs due a free existence check. */
-export async function placeIdsDueRefresh(limit = 500): Promise<Array<{ id: string; googlePlaceId: string }>> {
+export async function placeIdsDueRefresh(
+  limit = 500,
+): Promise<Array<{ id: string; googlePlaceId: string }>> {
   const cutoff = new Date(Date.now() - PLACE_ID_REFRESH_DAYS * 24 * 60 * 60 * 1000);
   return db().placeIdentifier.findMany({
     where: {
@@ -84,8 +86,12 @@ export async function recordPlaceIdRefresh(
   results: Record<string, boolean>,
 ): Promise<{ verified: number; invalidated: number }> {
   const now = new Date();
-  const alive = Object.entries(results).filter(([, exists]) => exists).map(([id]) => id);
-  const dead = Object.entries(results).filter(([, exists]) => !exists).map(([id]) => id);
+  const alive = Object.entries(results)
+    .filter(([, exists]) => exists)
+    .map(([id]) => id);
+  const dead = Object.entries(results)
+    .filter(([, exists]) => !exists)
+    .map(([id]) => id);
 
   const [verified, invalidated] = await db().$transaction([
     db().placeIdentifier.updateMany({
@@ -237,6 +243,13 @@ export async function getBusiness(tenant: TenantContext, businessId: string) {
       recommendations: { where: { isCurrent: true }, orderBy: { strength: 'desc' } },
       aiAnalyses: { orderBy: { createdAt: 'desc' }, take: 10 },
       notes: { orderBy: { createdAt: 'desc' } },
+      emailCandidates: { orderBy: { confidence: 'desc' } },
+      websiteAnalyses: { where: { isCurrent: true }, take: 1 },
+      campaignLeads: {
+        orderBy: { enrolledAt: 'desc' },
+        include: { campaign: { select: { id: true, name: true, status: true } } },
+      },
+      emailMessages: { orderBy: { createdAt: 'desc' }, take: 20 },
     },
   });
 
@@ -258,9 +271,16 @@ export interface LeadFilters {
   readonly searchJobId?: string;
   readonly excludeChains?: boolean;
   readonly search?: string;
+  /** Leads carrying ALL of these opportunity flags. */
+  readonly flags?: string[];
+  /** True: only leads with a contact address. False: only leads without one. */
+  readonly hasEmail?: boolean;
+  /** Upper bound on website quality — the weak sites worth pitching to. */
+  readonly maxWebsiteScore?: number;
 }
 
-export type LeadSortField = 'opportunityScore' | 'rating' | 'reviewCount' | 'createdAt' | 'displayName';
+export type LeadSortField =
+  'opportunityScore' | 'rating' | 'reviewCount' | 'createdAt' | 'displayName';
 
 /** Builds the tenant-scoped where clause shared by list and export. */
 export function leadWhere(tenant: TenantContext, filters: LeadFilters): Prisma.BusinessWhereInput {
@@ -292,6 +312,19 @@ export function leadWhere(tenant: TenantContext, filters: LeadFilters): Prisma.B
   }
   if (filters.searchJobId) {
     where.searchResults = { some: { searchJobId: filters.searchJobId } };
+  }
+  // hasEmail reads the denormalised column rather than joining EmailCandidate,
+  // which keeps "leads I can actually contact" an indexed filter at 100k rows.
+  if (filters.hasEmail === true) where.primaryEmail = { not: null };
+  if (filters.hasEmail === false) where.primaryEmail = null;
+
+  if (filters.maxWebsiteScore !== undefined) {
+    where.websiteQualityScore = { lte: filters.maxWebsiteScore };
+  }
+  // `hasEvery`: a lead must carry every selected flag, so stacking filters
+  // narrows the list as a user expects rather than widening it.
+  if (filters.flags?.length) {
+    where.opportunityFlags = { hasEvery: filters.flags };
   }
   // Case-insensitive substring search over the display name only. Deliberately
   // not a raw SQL LIKE built from user input.

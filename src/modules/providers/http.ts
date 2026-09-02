@@ -22,7 +22,14 @@ export interface HttpRequest {
   readonly url: string;
   readonly method?: 'GET' | 'POST';
   readonly headers?: Record<string, string>;
+  /** JSON-serialised into the request body, with the content type set for you. */
   readonly body?: unknown;
+  /**
+   * Pre-encoded body, sent verbatim. Needed for OAuth token endpoints, which
+   * require `application/x-www-form-urlencoded` rather than JSON. Callers must
+   * set their own `content-type`. Ignored when `body` is also given.
+   */
+  readonly rawBody?: string;
   readonly timeoutMs?: number;
   readonly maxBytes?: number;
   /** Identifies the provider in errors and logs. */
@@ -126,7 +133,7 @@ export async function request(input: HttpRequest): Promise<Result<HttpResponse>>
         ...(input.body !== undefined && { 'content-type': 'application/json' }),
         ...input.headers,
       },
-      body: input.body === undefined ? undefined : JSON.stringify(input.body),
+      body: input.body !== undefined ? JSON.stringify(input.body) : (input.rawBody ?? undefined),
       signal: controller.signal,
       // Redirects are not followed automatically: for provider APIs a redirect is
       // anomalous, and for scraped pages each hop must be re-validated by the
@@ -150,10 +157,14 @@ export async function request(input: HttpRequest): Promise<Result<HttpResponse>>
         code: aborted ? 'PROVIDER_TIMEOUT' : 'PROVIDER_UNAVAILABLE',
         message: aborted
           ? `${input.provider} ${input.operation} timed out after ${timeoutMs}ms`
-          : `${input.provider} ${input.operation} transport error: ${
-              redactSecrets(cause instanceof Error ? cause.message : String(cause))
-            }`,
-        context: { provider: input.provider, operation: input.operation, durationMs: Date.now() - started },
+          : `${input.provider} ${input.operation} transport error: ${redactSecrets(
+              cause instanceof Error ? cause.message : String(cause),
+            )}`,
+        context: {
+          provider: input.provider,
+          operation: input.operation,
+          durationMs: Date.now() - started,
+        },
         cause,
       }),
     );

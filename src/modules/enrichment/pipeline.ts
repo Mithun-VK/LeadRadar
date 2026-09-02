@@ -17,7 +17,6 @@
  * The pipeline reports its own spend and the reason for every decision, so an
  * unexpected bill is traceable to the choice that caused it.
  */
-import { AppError } from '@/lib/errors';
 import { logger } from '@/lib/logger';
 import { isThirdPartyListing, normalizeDomain, phoneDigits } from '@/modules/leads/normalize';
 import type { FetchedPage, ProviderRegistry, UsageRecord } from '@/modules/providers/contracts';
@@ -39,7 +38,13 @@ import {
   type DeterministicResult,
   type WebsiteQualitySignals,
 } from './verification';
-import { extractSocialProfiles, matchSocialToBusiness, type DiscoveredSocialProfile } from './social';
+import {
+  extractSocialProfiles,
+  matchSocialToBusiness,
+  type DiscoveredSocialProfile,
+} from './social';
+import { extractEmailsFromPage, mergeEmails, type DiscoveredEmail } from './contacts';
+import { analyzeWebsite, type WebsiteAnalysisResult } from './website-analysis';
 
 export interface EnrichmentSubject {
   readonly id: string;
@@ -82,7 +87,17 @@ export interface EnrichmentResult {
     readonly candidateDomain: string | null;
   } | null;
   readonly websiteQuality: WebsiteQualitySignals | null;
+  /**
+   * Structured analysis of the verified site. Null when no site was verified —
+   * there is nothing to analyse, which is different from analysing it as zero.
+   */
+  readonly websiteAnalysis: WebsiteAnalysisResult | null;
   readonly socialProfiles: readonly DiscoveredSocialProfile[];
+  /**
+   * Addresses published on the business's own pages. Extracted from documents
+   * the pipeline already paid to fetch, so this costs nothing extra.
+   */
+  readonly emails: readonly DiscoveredEmail[];
   readonly usage: readonly UsageRecord[];
   /** Ordered decision trail, for cost debugging and the lead's processing history. */
   readonly decisions: readonly string[];
@@ -258,7 +273,9 @@ export async function enrichBusiness(
       candidates,
       verification: null,
       websiteQuality: null,
+      websiteAnalysis: null,
       socialProfiles: socialFromSearch,
+      emails: [],
       usage,
       decisions,
       needsManualReview: false,
@@ -277,18 +294,25 @@ export async function enrichBusiness(
       candidates,
       verification: null,
       websiteQuality: null,
+      websiteAnalysis: null,
       socialProfiles: socialFromSearch,
+      emails: [],
       usage,
       decisions,
       needsManualReview: true,
     };
   }
 
-  const homepage = await providers.web.fetchPage({ url: target.url, includeLinks: true });
+  // includeHtml costs no extra credits (providers bill per page, not per format)
+  // and is what makes honest website analysis possible at all.
+  const homepage = await providers.web.fetchPage({
+    url: target.url,
+    includeLinks: true,
+    includeHtml: true,
+  });
   fetches += 1;
 
   if (!homepage.ok) {
-    usage.push(...(homepage.error instanceof AppError ? [] : []));
     decisions.push(`Could not load ${target.domain} (${homepage.error.code}).`);
 
     // A listed-but-dead website is a strong signal, not a gap: the business is
@@ -300,7 +324,9 @@ export async function enrichBusiness(
       candidates,
       verification: null,
       websiteQuality: null,
+      websiteAnalysis: null,
       socialProfiles: socialFromSearch,
+      emails: [],
       usage,
       decisions,
       needsManualReview: !broken,
@@ -321,6 +347,11 @@ export async function enrichBusiness(
 
   // Links accumulate across pages; the provider's response object stays immutable.
   const discoveredLinks: string[] = [...page.links];
+  // Every page actually fetched, so contact extraction can mine all of them
+  // without fetching anything again.
+  const fetchedPages: Array<{ page: FetchedPage; isContactPage: boolean }> = [
+    { page, isContactPage: false },
+  ];
 
   let result = scoreDeterministic({ business: businessFacts, page });
   decisions.push(`Deterministic verification scored ${result.score}/100 on the homepage.`);
@@ -332,17 +363,25 @@ export async function enrichBusiness(
     if (secondary.length > 0) {
       const guarded = await validateExternalUrl(secondary[0]!);
       if (guarded.ok) {
-        const second = await providers.web.fetchPage({ url: secondary[0]!, includeLinks: true });
+        const second = await providers.web.fetchPage({
+          url: secondary[0]!,
+          includeLinks: true,
+          includeHtml: true,
+        });
         fetches += 1;
 
         if (second.ok) {
           usage.push(...second.value.usage);
-          const secondResult = scoreDeterministic({ business: businessFacts, page: second.value.data });
+          const secondResult = scoreDeterministic({
+            business: businessFacts,
+            page: second.value.data,
+          });
           result = mergeResults(result, secondResult);
           decisions.push(
             `Fetched ${new URL(secondary[0]!).pathname} to resolve ambiguity; score is now ${result.score}/100.`,
           );
           discoveredLinks.push(...second.value.data.links);
+          fetchedPages.push({ page: second.value.data, isContactPage: true });
         }
       }
     }
@@ -359,7 +398,9 @@ export async function enrichBusiness(
    * "avoid AI to save money" instinct.
    */
   if (limits.allowAi && needsAiAdjudication(result)) {
-    decisions.push(`Score ${result.score} is in the ambiguous band; asking the model to adjudicate.`);
+    decisions.push(
+      `Score ${result.score} is in the ambiguous band; asking the model to adjudicate.`,
+    );
 
     const verdict = await providers.ai.matchWebsite({
       business: {
@@ -399,7 +440,9 @@ export async function enrichBusiness(
           evidence: result.evidence,
           usedAi: true,
         };
-        decisions.push(`Model returned ${ai.result.status} at ${ai.confidence.toFixed(2)} confidence; accepted.`);
+        decisions.push(
+          `Model returned ${ai.result.status} at ${ai.confidence.toFixed(2)} confidence; accepted.`,
+        );
       } else {
         outcome = { ...outcome, usedAi: true, confidence: Math.min(outcome.confidence, 0.65) };
         decisions.push(
@@ -408,7 +451,9 @@ export async function enrichBusiness(
         );
       }
     } else {
-      decisions.push(`Model adjudication failed (${verdict.error.code}); keeping the rule-based verdict.`);
+      decisions.push(
+        `Model adjudication failed (${verdict.error.code}); keeping the rule-based verdict.`,
+      );
     }
   } else if (!limits.allowAi && needsAiAdjudication(result)) {
     decisions.push('Ambiguous, but AI adjudication is disabled for this job; flagged for review.');
@@ -416,6 +461,43 @@ export async function enrichBusiness(
 
   const accepted = outcome.status === 'MATCH' || outcome.status === 'PROBABLE_MATCH';
   const quality = accepted ? assessWebsiteQuality(page) : null;
+
+  /**
+   * Analysis and contact extraction run ONLY on a site we accepted as this
+   * business's own.
+   *
+   * This gate is the difference between a useful lead and a confidently wrong
+   * one. Emails harvested from an unverified candidate would attach some other
+   * company's address to this business, and a campaign would then mail a
+   * stranger about a website that is not theirs — the failure mode that costs
+   * credibility across the whole list, not just one row.
+   */
+  const analysis = accepted ? analyzeWebsite(page) : null;
+
+  const emails = accepted
+    ? mergeEmails(
+        ...fetchedPages.map(({ page: fetched, isContactPage }) =>
+          extractEmailsFromPage(fetched, {
+            verifiedDomain: target.domain,
+            isContactPage,
+          }),
+        ),
+      )
+    : [];
+
+  if (accepted) {
+    decisions.push(
+      emails.length > 0
+        ? `Found ${emails.length} contact address(es) on pages already fetched, at no extra cost.`
+        : 'No contact address is published on the pages fetched.',
+    );
+    if (analysis) {
+      decisions.push(
+        `Website analysis scored ${analysis.qualityScore}/100 ` +
+          `(SEO ${analysis.seoScore}/25, mobile ${analysis.mobileScore}/20, security ${analysis.securityScore}/15).`,
+      );
+    }
+  }
 
   if (quality?.isParked) decisions.push('Verified site is a parked or placeholder page.');
   else if (quality?.isThin) decisions.push('Verified site is a single thin page.');
@@ -453,7 +535,9 @@ export async function enrichBusiness(
       candidateDomain: target.domain,
     },
     websiteQuality: quality,
+    websiteAnalysis: analysis,
     socialProfiles: [...mergedSocial.values()],
+    emails,
     usage,
     decisions,
     needsManualReview:
@@ -463,8 +547,10 @@ export async function enrichBusiness(
 }
 
 /** Platform list for the scoring engine. */
-export function socialPlatformsOf(
-  profiles: readonly DiscoveredSocialProfile[],
-): SocialPlatform[] {
-  return [...new Set(profiles.filter((p) => p.status !== 'PROBABLE' || p.confidence >= 0.6).map((p) => p.platform))];
+export function socialPlatformsOf(profiles: readonly DiscoveredSocialProfile[]): SocialPlatform[] {
+  return [
+    ...new Set(
+      profiles.filter((p) => p.status !== 'PROBABLE' || p.confidence >= 0.6).map((p) => p.platform),
+    ),
+  ];
 }

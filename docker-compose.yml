@@ -42,6 +42,60 @@ services:
       timeout: 5s
       retries: 10
 
+  # -------------------------------------------------------------------------
+  # Application tiers.
+  #
+  # Both live under the `app` profile and are NOT started by a bare
+  # `docker compose up`. The default developer loop is `npm run dev` against
+  # containerised Postgres and Redis, which gives hot reload; starting a built
+  # image alongside it would bind the same port and produce a confusing conflict.
+  #
+  #   docker compose up -d                      # datastores only (default)
+  #   docker compose --profile app up -d --build  # full stack
+  # -------------------------------------------------------------------------
+  web:
+    profiles: ['app']
+    build:
+      context: .
+      target: web
+    container_name: leadradar-web
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      # Service names, not localhost: inside the compose network these resolve to
+      # the containers, and the ports are the internal ones rather than the
+      # remapped host ports above.
+      DATABASE_URL: postgresql://leadradar:leadradar@postgres:5432/leadradar?schema=public
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+    ports:
+      - '${WEB_PORT:-3000}:3000'
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker:
+    profiles: ['app']
+    build:
+      context: .
+      target: worker
+    container_name: leadradar-worker
+    restart: unless-stopped
+    # PID 1 that reaps zombies and forwards SIGTERM, so the graceful drain in
+    # src/workers/index.ts actually runs on `docker compose stop`.
+    init: true
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql://leadradar:leadradar@postgres:5432/leadradar?schema=public
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    # Long enough for an in-flight page fetch to finish. The default 10s would
+    # cut a scrape short and leave the job to be retried at another credit's cost.
+    stop_grace_period: 40s
+
 volumes:
   leadradar-pgdata:
   leadradar-redisdata:

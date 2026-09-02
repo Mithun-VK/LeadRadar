@@ -164,18 +164,53 @@ export class MockDiscoveryProvider implements BusinessDiscoveryProvider {
 // Web discovery
 // ---------------------------------------------------------------------------
 
-/** Pages the mock web provider can serve, keyed by normalised domain. */
+/**
+ * Pages the mock web provider can serve, keyed by normalised domain.
+ *
+ * Each fixture carries real markup rather than only text, because the website
+ * analyzer measures structural facts — viewport tag, alt attributes, canonical
+ * link, structured data — that text cannot express. A fixture without markup
+ * would let the analyzer pass its tests while being untested on the thing it
+ * actually does.
+ *
+ * The fixtures deliberately differ in quality: one modern and well-formed, one
+ * dated and insecure, one parked. That spread is what makes flags and scores
+ * observable end to end in mock mode.
+ */
 const MOCK_PAGES: Record<
   string,
-  { title: string; description: string; content: string; links: string[] }
+  { title: string; description: string; content: string; links: string[]; html: string }
 > = {
   'srikrishnadentalcare.in': {
     title: 'Sri Krishna Dental Care | Dentist in Anna Nagar, Chennai',
     description: 'Family dental clinic in Anna Nagar, Chennai. Call +91 44 2815 1234.',
     content:
       'Sri Krishna Dental Care is a family dental clinic in Anna Nagar, Chennai. ' +
-      'Call us on +91 44 2815 1234 to book an appointment. Address: Anna Nagar, Chennai, Tamil Nadu.',
+      'Call us on +91 44 2815 1234 to book an appointment. Address: Anna Nagar, Chennai, Tamil Nadu. ' +
+      'Email us at info@srikrishnadentalcare.in for appointments. Our team offers implants, ' +
+      'root canal treatment, orthodontics, teeth whitening, and paediatric dentistry. We have ' +
+      'served families in Anna Nagar for over eighteen years and accept most insurance plans.',
     links: ['/about', '/contact', '/services'],
+    // A well-built site: viewport, structured data, canonical, alt text.
+    html: `<!doctype html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sri Krishna Dental Care | Dentist in Anna Nagar, Chennai</title>
+<meta name="description" content="Family dental clinic in Anna Nagar, Chennai. Book an appointment on +91 44 2815 1234.">
+<link rel="canonical" href="https://srikrishnadentalcare.in/">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Dentist","name":"Sri Krishna Dental Care"}</script>
+</head><body>
+<h1>Sri Krishna Dental Care</h1>
+<p>Family dental clinic in Anna Nagar, Chennai. Call <a href="tel:+914428151234">+91 44 2815 1234</a>
+or email <a href="mailto:info@srikrishnadentalcare.in">info@srikrishnadentalcare.in</a>.</p>
+<p>Book an appointment online. Implants, root canal treatment, orthodontics, whitening.</p>
+<img src="/clinic.jpg" alt="Reception at Sri Krishna Dental Care">
+<img src="/team.jpg" alt="Our dental team">
+<img srcset="/wide.jpg 1200w, /narrow.jpg 600w" src="/wide.jpg" alt="Treatment room">
+<nav><a href="/about">About</a><a href="/contact">Contact</a><a href="/services">Services</a>
+<a href="/team">Team</a><a href="/pricing">Pricing</a><a href="/blog">Blog</a>
+<a href="/faq">FAQ</a><a href="/reviews">Reviews</a></nav>
+</body></html>`,
   },
   'koramangaladentalhub.in': {
     title: 'Koramangala Dental Hub — Dentist in Bangalore',
@@ -184,6 +219,19 @@ const MOCK_PAGES: Record<
       'Koramangala Dental Hub. Phone +91 80 4123 4567. Koramangala, Bangalore, Karnataka. ' +
       'Book online. Implants, orthodontics, whitening.',
     links: ['/about', '/contact', '/book'],
+    // Deliberately dated: no viewport, no structured data, no meta description,
+    // served over HTTP with images missing alt text. This is the fixture that
+    // exercises NO_HTTPS, POOR_MOBILE, OUTDATED_WEBSITE and MISSING_ALT_TEXT.
+    html: `<!doctype html><html><head>
+<title>Koramangala Dental Hub</title>
+</head><body>
+<h1>Koramangala Dental Hub</h1><h1>Welcome</h1>
+<p>Phone +91 80 4123 4567. Koramangala, Bangalore. Book online.</p>
+<p>Contact: contact@koramangaladentalhub.in</p>
+<img src="http://koramangaladentalhub.in/banner.jpg">
+<img src="http://koramangaladentalhub.in/chair.jpg">
+<a href="/about">About</a><a href="/contact">Contact</a><a href="/book">Book</a>
+</body></html>`,
   },
   'jubileehillsdentalstudio.example': {
     title: 'Jubilee Hills Dental Studio',
@@ -192,6 +240,8 @@ const MOCK_PAGES: Record<
     // lead, and the digital-presence rules must be able to see that.
     content: 'Jubilee Hills Dental Studio. Coming soon.',
     links: [],
+    html: `<!doctype html><html><head><title>Jubilee Hills Dental Studio</title></head>
+<body><h1>Coming soon</h1><p>Jubilee Hills Dental Studio. Coming soon.</p></body></html>`,
   },
   'wrong-business.example': {
     title: 'Chennai Silks — Sarees and Textiles',
@@ -200,6 +250,10 @@ const MOCK_PAGES: Record<
     // but wrong result — the failure mode that most damages lead trust.
     content: 'Chennai Silks. Sarees, textiles, wedding collections. Phone +91 44 9999 0000.',
     links: ['/contact'],
+    html: `<!doctype html><html><head><title>Chennai Silks — Sarees and Textiles</title>
+<meta name="viewport" content="width=device-width"></head>
+<body><h1>Chennai Silks</h1><p>Sarees, textiles, wedding collections. Phone +91 44 9999 0000.</p>
+<a href="/contact">Contact</a></body></html>`,
   },
 };
 
@@ -207,9 +261,7 @@ export class MockWebDiscoveryProvider implements WebDiscoveryProvider {
   readonly name = 'mock-firecrawl';
   readonly isMock = true;
 
-  async search(
-    request: WebSearchRequest,
-  ): Promise<Result<WithUsage<readonly WebSearchResult[]>>> {
+  async search(request: WebSearchRequest): Promise<Result<WithUsage<readonly WebSearchResult[]>>> {
     const needle = request.query.toLowerCase();
 
     // Match a fixture business by name, then offer its site plus one decoy, so
@@ -288,16 +340,22 @@ export class MockWebDiscoveryProvider implements WebDiscoveryProvider {
       );
     }
 
+    // The dated fixture is served over HTTP on purpose, so the security checks
+    // and the NO_HTTPS flag have something real to fire on in mock mode.
+    const https = domain !== 'koramangaladentalhub.in';
+    const scheme = https ? 'https' : 'http';
+
     return ok({
       data: {
         url: request.url,
-        finalUrl: `https://${domain}/`,
+        finalUrl: `${scheme}://${domain}/`,
         statusCode: 200,
         title: page.title,
         description: page.description,
         content: page.content,
-        links: page.links.map((link) => `https://${domain}${link}`),
-        httpsEnabled: true,
+        html: request.includeHtml ? page.html : null,
+        links: page.links.map((link) => `${scheme}://${domain}${link}`),
+        httpsEnabled: https,
         byteLength: page.content.length,
         fetchedAt: new Date('2026-08-08T00:00:00.000Z'),
       },
@@ -443,7 +501,8 @@ export class MockAiProvider implements AiProvider {
       .split(/\s+/)
       .filter((token) => token.length > 3);
 
-    const matchedName = nameTokens.length > 0 && nameTokens.every((token) => content.includes(token));
+    const matchedName =
+      nameTokens.length > 0 && nameTokens.every((token) => content.includes(token));
     const matchedPhone =
       input.business.phoneDigits !== null &&
       input.candidate.phoneDigitsFound.includes(input.business.phoneDigits);

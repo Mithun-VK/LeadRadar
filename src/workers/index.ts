@@ -16,7 +16,13 @@ import { logger } from '@/lib/logger';
 import { closeRedis } from '@/lib/redis';
 import { closeDatabase, databaseHealthy } from '@/modules/database/client';
 import { redisHealthy } from '@/lib/redis';
-import { QUEUE_NAMES, closeQueues, createWorker, getQueue, type WorkerHandle } from '@/modules/jobs/queues';
+import {
+  QUEUE_NAMES,
+  closeQueues,
+  createWorker,
+  getQueue,
+  type WorkerHandle,
+} from '@/modules/jobs/queues';
 import {
   processDiscover,
   processEnrich,
@@ -25,6 +31,7 @@ import {
   processSearch,
 } from '@/modules/jobs/processors';
 import { processExport } from '@/modules/export/worker';
+import { processCampaignTick, processSendEmail } from '@/modules/email/worker';
 
 const log = logger().child({ component: 'worker-main' });
 
@@ -47,6 +54,41 @@ async function scheduleMaintenance(): Promise<void> {
     { task: 'refresh-place-ids', limit: 500 },
     { repeat: { pattern: '0 3 * * *' }, jobId: 'repeat~refresh-place-ids' },
   );
+
+  /**
+   * Campaign scheduler: every 15 minutes.
+   *
+   * A campaign advances through delayed jobs, so a worker restart between two
+   * messages would leave it RUNNING but never advancing. This re-wakes any such
+   * campaign. It is idempotent — the deterministic send job id means a duplicated
+   * tick cannot produce a duplicate email.
+   */
+  await queue.add(
+    'campaign-scheduler',
+    { task: 'campaign-scheduler', limit: 100 },
+    { repeat: { pattern: '*/15 * * * *' }, jobId: 'repeat~campaign-scheduler' },
+  );
+
+  /**
+   * Inbox sync: every 10 minutes.
+   *
+   * Frequent enough that a reply stops the next follow-up in practice — sequences
+   * are spaced in days, so a ten-minute detection window closes the gap that
+   * matters. Not more frequent, because each run costs Gmail API quota and a
+   * reply an hour later is not meaningfully worse for the recipient.
+   */
+  await queue.add(
+    'inbox-sync',
+    { task: 'inbox-sync', limit: 100 },
+    { repeat: { pattern: '*/10 * * * *' }, jobId: 'repeat~inbox-sync' },
+  );
+
+  /** Reply-body retention, daily. See docs/DATA_RETENTION.md. */
+  await queue.add(
+    'purge-email-bodies',
+    { task: 'purge-email-bodies', limit: 5_000 },
+    { repeat: { pattern: '23 4 * * *' }, jobId: 'repeat~purge-email-bodies' },
+  );
 }
 
 function startWorkers(): void {
@@ -56,6 +98,14 @@ function startWorkers(): void {
     createWorker(QUEUE_NAMES.websiteDiscovery, (job) => processEnrich(job.data, job.id)),
     createWorker(QUEUE_NAMES.scoring, (job) => processScore(job.data, job.id)),
     createWorker(QUEUE_NAMES.export, (job) => processExport(job.data, job.id)),
+    // One worker handles both email job kinds, dispatching on the job name, so
+    // the queue's concurrency of 1 covers sending AND scheduling. Two workers on
+    // the same queue would each get their own slot and defeat that.
+    createWorker(QUEUE_NAMES.email, (job) =>
+      job.name === 'send'
+        ? processSendEmail(job.data, job.id)
+        : processCampaignTick(job.data, job.id),
+    ),
     createWorker(QUEUE_NAMES.maintenance, (job) => processMaintenance(job.data, job.id)),
   );
 }

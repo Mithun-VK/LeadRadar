@@ -18,8 +18,17 @@ export const dynamic = 'force-dynamic';
 
 const NAV = [
   { href: '/dashboard', label: 'Overview' },
+  // Sales sits second, immediately after the overview: it is the screen an
+  // operator opens every morning, and burying it under discovery tools would
+  // mean replies sit unanswered while someone runs another search.
+  { href: '/dashboard/sales', label: 'Sales' },
+  { href: '/dashboard/pipeline', label: 'Pipeline' },
   { href: '/dashboard/search', label: 'Search' },
   { href: '/dashboard/leads', label: 'Leads' },
+  { href: '/dashboard/campaigns', label: 'Campaigns' },
+  { href: '/dashboard/templates', label: 'Templates' },
+  { href: '/dashboard/email', label: 'Email' },
+  { href: '/dashboard/analytics', label: 'Analytics' },
   { href: '/dashboard/jobs', label: 'Jobs' },
   { href: '/dashboard/usage', label: 'Cost' },
   { href: '/dashboard/settings', label: 'Settings' },

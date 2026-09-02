@@ -140,6 +140,16 @@ export interface PageFetchRequest {
   readonly url: string;
   /** Ask the provider for markdown plus links; never a whole-site crawl. */
   readonly includeLinks?: boolean;
+  /**
+   * Also return the raw document.
+   *
+   * Costs no extra credits — providers bill per page, not per format — but adds
+   * bandwidth, so it is opt-in. Required for honest website analysis: viewport
+   * meta, image alt attributes, canonical links, and structured data simply do
+   * not survive conversion to markdown, and scoring them from markdown would
+   * mean inventing measurements.
+   */
+  readonly includeHtml?: boolean;
   readonly timeoutMs?: number;
   readonly maxBytes?: number;
 }
@@ -153,6 +163,12 @@ export interface FetchedPage {
   readonly description: string | null;
   /** Cleaned text/markdown. Treated as UNTRUSTED throughout the codebase. */
   readonly content: string;
+  /**
+   * Raw document, present only when `includeHtml` was requested. Also UNTRUSTED,
+   * and never placed in an AI instruction channel — it is parsed by our own code
+   * for structural facts and nothing else.
+   */
+  readonly html: string | null;
   readonly links: readonly string[];
   readonly httpsEnabled: boolean;
   readonly byteLength: number;
@@ -307,6 +323,96 @@ export interface WebsiteVerificationProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Email sending
+// ---------------------------------------------------------------------------
+
+/** OAuth tokens as this application stores them. */
+export interface OAuthTokens {
+  readonly accessToken: string;
+  /**
+   * Null when the provider did not issue a new one. That is normal on re-consent
+   * and must NOT be treated as a failure — the previously stored refresh token
+   * remains valid, and overwriting it with null would break background sending.
+   */
+  readonly refreshToken: string | null;
+  readonly expiresAt: Date;
+  readonly scopes: readonly string[];
+}
+
+export interface SendMessageRequest {
+  readonly accessToken: string;
+  /** A complete RFC 5322 message, already composed and sanitised. */
+  readonly mime: string;
+  /** For logging and mock behaviour only; the recipient is inside the MIME. */
+  readonly to: string;
+}
+
+export interface SendMessageResult {
+  readonly providerMessageId: string;
+  readonly providerThreadId: string | null;
+}
+
+/** A message read back out of the connected mailbox. */
+export interface InboundMessage {
+  readonly providerMessageId: string;
+  readonly threadId: string;
+  readonly fromEmail: string;
+  readonly toEmail: string;
+  readonly subject: string | null;
+  /** Plain text, truncated by the adapter. Treated as UNTRUSTED. */
+  readonly body: string;
+  readonly receivedAt: Date;
+  /** RFC 5322 `In-Reply-To`, when present — the strongest reply linkage. */
+  readonly inReplyTo: string | null;
+  /** True when the provider labels this as sent by the account holder. */
+  readonly isFromSelf: boolean;
+}
+
+export interface FetchInboxRequest {
+  readonly accessToken: string;
+  /** Only messages newer than this. Keeps a re-sync cheap and bounded. */
+  readonly since: Date;
+  /** Hard ceiling on messages examined in one sync. */
+  readonly maxMessages?: number;
+}
+
+/**
+ * A provider that can send mail on the operator's behalf.
+ *
+ * Kept as an interface for the same reason as every other provider here: so the
+ * pipeline never imports an SDK, and so the ENTIRE outreach path — campaigns,
+ * queueing, suppression, retries, status tracking — can be exercised end to end
+ * with no credentials and no message ever leaving the machine.
+ *
+ * That last property is not a testing convenience. It is what makes it safe to
+ * develop a feature whose failure mode is emailing real strangers.
+ */
+export interface EmailSendProvider {
+  readonly name: string;
+  readonly isMock: boolean;
+
+  /** URL to send the operator to in order to grant access. */
+  authorizationUrl(state: string): string;
+  /** Exchanges an authorization code for tokens. */
+  exchangeCode(code: string): Promise<Result<OAuthTokens>>;
+  /** Trades a refresh token for a fresh access token. */
+  refreshAccessToken(refreshToken: string): Promise<Result<OAuthTokens>>;
+  /** Confirms which mailbox a grant belongs to. */
+  getProfile(accessToken: string): Promise<Result<{ emailAddress: string }>>;
+  send(request: SendMessageRequest): Promise<Result<SendMessageResult>>;
+
+  /**
+   * Reads recent messages, for reply detection.
+   *
+   * Returns everything it finds; deciding which messages relate to a lead is the
+   * caller's job, and the caller discards the rest without storing it. Keeping
+   * that filter out of the adapter means the retention rule lives in one place
+   * rather than being a property of each provider.
+   */
+  fetchInbox(request: FetchInboxRequest): Promise<Result<readonly InboundMessage[]>>;
+}
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -315,6 +421,12 @@ export interface ProviderRegistry {
   readonly discovery: BusinessDiscoveryProvider;
   readonly web: WebDiscoveryProvider;
   readonly ai: AiProvider;
+  /**
+   * Present only when outbound email is enabled. Null is the default, and the
+   * send path checks it rather than assuming — an operator who never connects a
+   * mailbox must not have a half-initialised sender sitting in the registry.
+   */
+  readonly email: EmailSendProvider | null;
   readonly mode: 'live' | 'mock';
 }
 

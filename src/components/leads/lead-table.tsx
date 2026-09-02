@@ -17,10 +17,10 @@ import Link from 'next/link';
 import { api } from '@/lib/api-client';
 
 import {
-  ConfidencePill,
   EmptyState,
+  FlagChips,
   GradeBadge,
-  PresenceMeter,
+  ScoreBar,
   websiteLabel,
 } from '@/components/ui/primitives';
 
@@ -32,11 +32,14 @@ interface LeadRow {
   rating: number | null;
   reviewCount: number | null;
   phone: string | null;
+  primaryEmail: string | null;
   googleWebsiteStatus: string;
   independentWebsiteStatus: string;
   verifiedDomain: string | null;
   digitalPresence: string | null;
   opportunityScore: number | null;
+  websiteQualityScore: number | null;
+  opportunityFlags: string[];
   leadPriority: string | null;
   priorityLabel: string | null;
   identityVerification: string;
@@ -68,7 +71,36 @@ const WEBSITE_FILTERS = [
   { value: 'GOOGLE_WEBSITE_PRESENT', label: 'Has a website' },
 ];
 
-export function LeadTable({ searchJobId }: { searchJobId?: string }) {
+/**
+ * The flags worth a one-click filter.
+ *
+ * A subset rather than all twenty-two: a filter bar with every flag is a filter
+ * bar nobody reads. These are the ones that map to a service an agency sells.
+ */
+const FLAG_FILTERS = [
+  { value: 'NO_WEBSITE', label: 'No website' },
+  { value: 'DIRECTORY_LISTING_ONLY', label: 'Directory only' },
+  { value: 'NO_HTTPS', label: 'No HTTPS' },
+  { value: 'POOR_MOBILE', label: 'Poor mobile' },
+  { value: 'POOR_SEO', label: 'Poor SEO' },
+  { value: 'OUTDATED_WEBSITE', label: 'Outdated' },
+];
+
+export interface LeadSelection {
+  readonly ids: readonly string[];
+  readonly clear: () => void;
+}
+
+export function LeadTable({
+  searchJobId,
+  onSelectionChange,
+  selectable = false,
+}: {
+  searchJobId?: string;
+  /** Emits selected ids so a campaign builder can consume them. */
+  onSelectionChange?: (ids: string[]) => void;
+  selectable?: boolean;
+}) {
   const [data, setData] = useState<LeadsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -77,7 +109,10 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
   const [priority, setPriority] = useState<string[]>([]);
   const [website, setWebsite] = useState<string[]>([]);
   const [excludeChains, setExcludeChains] = useState(false);
+  const [hasEmail, setHasEmail] = useState(false);
+  const [flags, setFlags] = useState<string[]>([]);
   const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<string[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -85,6 +120,8 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
 
     if (priority.length > 0) params.set('priority', priority.join(','));
     if (website.length > 0) params.set('googleWebsiteStatus', website.join(','));
+    if (flags.length > 0) params.set('flags', flags.join(','));
+    if (hasEmail) params.set('hasEmail', 'true');
     if (excludeChains) params.set('excludeChains', 'true');
     if (search.trim() !== '') params.set('search', search.trim());
     if (searchJobId) params.set('searchJobId', searchJobId);
@@ -95,7 +132,18 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
     } finally {
       setLoading(false);
     }
-  }, [page, sortBy, sortDir, priority, website, excludeChains, search, searchJobId]);
+  }, [
+    page,
+    sortBy,
+    sortDir,
+    priority,
+    website,
+    flags,
+    hasEmail,
+    excludeChains,
+    search,
+    searchJobId,
+  ]);
 
   useEffect(() => {
     // Debounced so typing in the search box does not fire a request per keystroke.
@@ -103,10 +151,23 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
     return () => clearTimeout(timer);
   }, [load]);
 
+  useEffect(() => {
+    onSelectionChange?.(selected);
+  }, [selected, onSelectionChange]);
+
   function toggle(list: string[], value: string, setter: (next: string[]) => void) {
     setter(list.includes(value) ? list.filter((entry) => entry !== value) : [...list, value]);
     setPage(1);
   }
+
+  function toggleRow(id: string): void {
+    setSelected((current) =>
+      current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id],
+    );
+  }
+
+  const pageIds = data?.rows.map((row) => row.id) ?? [];
+  const allOnPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
 
   return (
     <div className="space-y-4">
@@ -155,6 +216,34 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
           </button>
         ))}
 
+        {FLAG_FILTERS.map((filter) => (
+          <button
+            key={filter.value}
+            type="button"
+            onClick={() => toggle(flags, filter.value, setFlags)}
+            aria-pressed={flags.includes(filter.value)}
+            className={`rounded-md border px-2 py-1 text-xs ${
+              flags.includes(filter.value)
+                ? 'border-[var(--accent)] text-[var(--accent)]'
+                : 'border-[var(--border)] text-[var(--muted)]'
+            }`}
+          >
+            {filter.label}
+          </button>
+        ))}
+
+        <label className="flex items-center gap-1.5 text-xs text-[var(--muted)]">
+          <input
+            type="checkbox"
+            checked={hasEmail}
+            onChange={(event) => {
+              setHasEmail(event.target.checked);
+              setPage(1);
+            }}
+          />
+          Has email
+        </label>
+
         <label className="flex items-center gap-1.5 text-xs text-[var(--muted)]">
           <input
             type="checkbox"
@@ -172,6 +261,19 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
         </span>
       </div>
 
+      {selectable && selected.length > 0 && (
+        <div className="flex items-center gap-3 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-4 py-2 text-xs">
+          <span className="font-medium">{selected.length} selected</span>
+          <button
+            type="button"
+            onClick={() => setSelected([])}
+            className="text-[var(--muted)] underline"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
       {loading && !data ? (
         <EmptyState title="Loading leads…" />
       ) : !data || data.rows.length === 0 ? (
@@ -184,6 +286,22 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
           <table className="w-full min-w-[1100px] text-sm">
             <thead>
               <tr className="border-b border-[var(--border)] text-left text-[11px] uppercase tracking-wide text-[var(--muted)]">
+                {selectable && (
+                  <th className="px-3 py-2">
+                    <input
+                      type="checkbox"
+                      checked={allOnPageSelected}
+                      aria-label="Select all on this page"
+                      onChange={(event) => {
+                        setSelected((current) =>
+                          event.target.checked
+                            ? [...new Set([...current, ...pageIds])]
+                            : current.filter((id) => !pageIds.includes(id)),
+                        );
+                      }}
+                    />
+                  </th>
+                )}
                 <Th>Business</Th>
                 <Th>City</Th>
                 {SORTABLE.filter((column) => column.key !== 'displayName').map((column) => (
@@ -206,9 +324,10 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
                   </th>
                 ))}
                 <Th>Website</Th>
-                <Th>Presence</Th>
+                <Th>Site score</Th>
+                <Th>Email</Th>
                 <Th>Grade</Th>
-                <Th>Confidence</Th>
+                <Th>Opportunity</Th>
                 <Th>Why this lead</Th>
               </tr>
             </thead>
@@ -218,14 +337,30 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
                   key={row.id}
                   className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--surface-muted)]"
                 >
+                  {selectable && (
+                    <td className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(row.id)}
+                        aria-label={`Select ${row.displayName}`}
+                        onChange={() => toggleRow(row.id)}
+                      />
+                    </td>
+                  )}
                   <td className="px-3 py-2">
-                    <Link href={`/dashboard/leads/${row.id}`} className="font-medium hover:underline">
+                    <Link
+                      href={`/dashboard/leads/${row.id}`}
+                      className="font-medium hover:underline"
+                    >
                       {row.displayName}
                     </Link>
                     <div className="text-[11px] text-[var(--muted)]">
                       {row.primaryCategory ?? '—'}
                       {row.isChain && (
-                        <span className="ml-1 text-[var(--grade-c)]" title="Chain or franchise: decisions are made at head office">
+                        <span
+                          className="ml-1 text-[var(--grade-c)]"
+                          title="Chain or franchise: decisions are made at head office"
+                        >
                           · chain
                         </span>
                       )}
@@ -243,7 +378,25 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
                     )}
                   </td>
                   <td className="px-3 py-2">
-                    <PresenceMeter level={row.digitalPresence} />
+                    <ScoreBar
+                      value={row.websiteQualityScore}
+                      label="/100"
+                      notMeasuredHint="No website was verified for this business, so there is nothing to score."
+                    />
+                  </td>
+                  <td className="px-3 py-2 text-xs">
+                    {row.primaryEmail ? (
+                      <a href={`mailto:${row.primaryEmail}`} className="hover:underline">
+                        {row.primaryEmail}
+                      </a>
+                    ) : (
+                      <span
+                        className="text-[var(--muted)]"
+                        title="No address was found on this business's own pages"
+                      >
+                        None found
+                      </span>
+                    )}
                   </td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
@@ -253,8 +406,8 @@ export function LeadTable({ searchJobId }: { searchJobId?: string }) {
                       </span>
                     </div>
                   </td>
-                  <td className="px-3 py-2">
-                    <ConfidencePill value={row.verificationConfidence} />
+                  <td className="max-w-[14rem] px-3 py-2">
+                    <FlagChips flags={row.opportunityFlags} />
                   </td>
                   <td className="max-w-[26rem] px-3 py-2 text-xs text-[var(--muted)]">
                     {row.topPitch ?? '—'}
