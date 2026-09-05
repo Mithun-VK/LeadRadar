@@ -401,7 +401,24 @@ export interface DealFilters {
   readonly ownerUserId?: string;
   readonly openOnly?: boolean;
   readonly campaignId?: string;
+  /** Rows to return. Capped at {@link MAX_DEALS_PER_QUERY} whatever is asked for. */
+  readonly limit?: number;
 }
+
+/**
+ * Ceiling on one deal query.
+ *
+ * `listDeals` feeds the Kanban board, which wants "all the deals" — so it had no
+ * limit at all. Measured at 1,200 deals that is 328ms at p95, acceptable today
+ * and unbounded tomorrow: nothing in the query grows slower than the pipeline
+ * does, and a board rendering four thousand cards is not usable anyway.
+ *
+ * 500 is well above any pipeline a human works and well below the point where
+ * the query or the browser struggles. `pipelineTotals` remains uncapped and
+ * correct for the headline numbers — it reads three columns and measured 21ms,
+ * so the counts stay accurate even when the board itself is truncated.
+ */
+export const MAX_DEALS_PER_QUERY = 500;
 
 export async function listDeals(tenant: TenantContext, filters: DealFilters = {}) {
   const where: Prisma.DealWhereInput = { organizationId: tenant.organizationId };
@@ -414,6 +431,7 @@ export async function listDeals(tenant: TenantContext, filters: DealFilters = {}
   return db().deal.findMany({
     where,
     orderBy: [{ stage: 'asc' }, { valueMinor: { sort: 'desc', nulls: 'last' } }],
+    take: Math.min(filters.limit ?? MAX_DEALS_PER_QUERY, MAX_DEALS_PER_QUERY),
     include: {
       business: { select: { id: true, displayName: true, city: true, leadPriority: true } },
       owner: { select: { email: true, name: true } },
