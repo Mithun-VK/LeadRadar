@@ -44,17 +44,31 @@ function tenantOf(payload: { organizationId: string; userId?: string }): TenantC
   };
 }
 
-/** Deterministic id, so a duplicated job cannot produce a second email. */
+/**
+ * Deterministic id, so a duplicated job cannot produce a second email.
+ *
+ * `~` as the separator, NOT `:`. BullMQ reserves the colon for its own key
+ * namespacing and rejects a custom job id containing one — "Custom Id cannot
+ * contain :". These ids previously used colons, which meant every campaign tick
+ * and every send enqueue was refused by Redis. The campaign scheduler failed
+ * every fifteen minutes for the same reason, and campaigns sat at RUNNING
+ * forever because nothing could advance them.
+ *
+ * It went unnoticed because the verification scripts call `sendCampaignEmail`
+ * directly rather than through the queue, so they exercised the send path
+ * without ever exercising the enqueue. `lib/ids.ts` already used `~` correctly;
+ * these two functions did not.
+ */
 export function sendJobId(campaignId: string, businessId: string, stepNumber?: number): string {
   // Step-scoped so step 2 is not mistaken for a duplicate of step 1. Omitted for
-  // single-send campaigns, keeping their ids byte-identical to before.
+  // single-send campaigns.
   return stepNumber === undefined
-    ? `send:${campaignId}:${businessId}`
-    : `send:${campaignId}:${businessId}:s${stepNumber}`;
+    ? `send~${campaignId}~${businessId}`
+    : `send~${campaignId}~${businessId}~s${stepNumber}`;
 }
 
 export function tickJobId(campaignId: string): string {
-  return `tick:${campaignId}`;
+  return `tick~${campaignId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +157,7 @@ async function scheduleNextSend(
     'campaign-tick',
     { organizationId: tenant.organizationId, campaignId } satisfies CampaignTickPayload,
     {
-      jobId: `${tickJobId(campaignId)}:${Date.now()}`,
+      jobId: `${tickJobId(campaignId)}~${Date.now()}`,
       delay: delaySeconds * 1_000,
     },
   );
@@ -209,7 +223,7 @@ export async function processCampaignTick(
       await getQueue(QUEUE_NAMES.email).add(
         'campaign-tick',
         { organizationId: tenant.organizationId, campaignId: campaign.id },
-        { jobId: `${tickJobId(campaign.id)}:wait:${wakeAt?.getTime() ?? Date.now()}`, delay: delayMs },
+        { jobId: `${tickJobId(campaign.id)}~wait~${wakeAt?.getTime() ?? Date.now()}`, delay: delayMs },
       );
 
       log.info({ wakeAt, delayMs }, 'No step due yet; re-armed for the next one');
@@ -294,7 +308,7 @@ export async function resumeRunningCampaigns(): Promise<{ resumed: number }> {
         organizationId: campaign.organizationId,
         campaignId: campaign.id,
       } satisfies CampaignTickPayload,
-      { jobId: `${tickJobId(campaign.id)}:resume:${Date.now()}` },
+      { jobId: `${tickJobId(campaign.id)}~resume~${Date.now()}` },
     );
   }
 

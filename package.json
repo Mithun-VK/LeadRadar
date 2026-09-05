@@ -38,7 +38,8 @@
     "verify:query": "tsx scripts/verify-user-query.ts",
     "verify:sequence": "tsx scripts/verify-sequence.ts",
     "certify:gmail": "tsx scripts/certify-gmail.ts",
-    "load-test": "tsx scripts/load-test.ts"
+    "load-test": "tsx scripts/load-test.ts",
+    "verify:recovery": "tsx scripts/verify-recovery.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

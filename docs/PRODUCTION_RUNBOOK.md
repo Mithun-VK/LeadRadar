@@ -169,6 +169,159 @@ spam-filter trigger.
 
 ---
 
+## 2a. Observability — the twelve operator procedures
+
+### Health endpoints
+
+| Endpoint | Auth | Depth | Use |
+|---|---|---|---|
+| `GET /api/health/live` | public | **none** — no DB, no Redis | Container liveness. Restart on failure. |
+| `GET /api/health/ready` | public | DB + Redis | Load-balancer readiness. 503 when degraded. |
+| `GET /api/health` | public | DB + Redis | Legacy combined check. |
+| `GET /api/ops/status` | **session** | everything | The operator's screen. |
+
+Liveness is deliberately shallow. It answers *"should this container be
+restarted?"*, and restarting a healthy web process because Postgres blipped turns
+a database wobble into an outage.
+
+`/api/ops/status` is authenticated because it reports queue depths, worker
+hostnames, and failure rates — together, the shape of a deployment.
+
+### 1. Start the system
+
+```bash
+docker compose up -d          # Postgres + Redis
+npm run dev                   # web
+npm run worker                # workers — NOT optional
+```
+
+Without the worker: no discovery, no sending, no reply detection, no retention.
+
+### 2. Check health
+
+```bash
+curl -s localhost:3000/api/health/ready
+# then, signed in:
+curl -s localhost:3000/api/ops/status | jq '{status, alerts: [.alerts[].code]}'
+```
+
+`status` is `ok` / `degraded` / `critical`. Every alert carries an `action`.
+
+### 3. Connect Gmail — see §2 and `docs/GMAIL_SETUP.md`
+
+### 4. Verify outbound
+
+```bash
+npm run verify:outreach       # mock-mode proof of the whole send path
+npm run certify:gmail         # LIVE proof — refuses to run against the mock
+```
+
+### 5. Pause outbound — see §3. Fails **closed**.
+
+### 6. Investigate failed jobs
+
+`/api/ops/status` → `queues[].failed` and `queues[].deadLettered`.
+
+Dead-lettered jobs exhausted their retries and **will not retry on their own**.
+Each carries `originalName`, `originalJobId`, `payload`, and `failedReason`.
+
+A cluster of identical `failedReason` values is one bug, not many — that is
+exactly how the `Custom Id cannot contain :` defect was found (89 identical
+failures from a scheduler failing every 15 minutes).
+
+### 7. Recover workers
+
+```bash
+# Is one alive?
+curl -s localhost:3000/api/ops/status | jq '.workers'
+npm run worker                # queued jobs resume automatically
+```
+
+Workers heartbeat into Redis every 15s with a 45s TTL. **No heartbeat = no
+worker**, not merely an idle one. A stale heartbeat (>90s) usually means wedged
+on a long job.
+
+Jobs are not lost on a crash: BullMQ re-delivers anything in flight, and the
+campaign scheduler re-wakes running campaigns every 15 minutes.
+
+### 8. Handle Gmail failure
+
+`/api/ops/status` → `gmail.state`:
+
+| State | Do |
+|---|---|
+| `DEGRADED` | Nothing. Still sending; watch it clear. |
+| `BLOCKED` | Check `lastErrorCode`. If rate limited, lower the campaign daily limit. |
+| `AUTH_REQUIRED` | **Reconnect.** Retrying cannot fix a revoked grant. |
+| `DISCONNECTED` | Connect a mailbox. |
+
+### 9. Roll back a deployment
+
+Migrations are **additive only** — no column has been dropped or repurposed — so
+the previous release runs against the current schema. Roll back the application;
+leave the database alone.
+
+Never `prisma migrate reset`: it drops everything.
+
+### 10. Verify the database
+
+```bash
+npx prisma migrate status     # must say: Database schema is up to date!
+curl -s localhost:3000/api/ops/status | jq '.infrastructure'
+```
+
+`databaseLatencyMs` above ~500ms consistently means disk or connection pressure.
+
+### 11. Verify the queue
+
+```bash
+curl -s localhost:3000/api/ops/status | jq '.queues'
+```
+
+`waiting` is normal after a large search and should drain. Growing with a live
+worker means it cannot keep up. `paused: true` stops that queue entirely.
+
+### 12. Emergency shutdown
+
+```bash
+# 1. Stop outbound first — the only irreversible thing.
+curl -X POST localhost:3000/api/ops/controls -H 'content-type: application/json' \
+  -H "x-csrf-token: $CSRF" --cookie "leadradar_session=$SESSION" \
+  -d '{"control":"outbound","paused":true,"reason":"incident"}'
+
+# 2. Then stop processes. SIGTERM drains in-flight jobs; SIGKILL does not.
+kill -TERM <worker-pid>
+```
+
+Order matters. Killing the worker first leaves campaigns able to resume the
+moment it restarts; pausing outbound first means they cannot.
+
+---
+
+## 2b. Alert thresholds
+
+Evaluated on read at `/api/ops/status`. No alerting platform — an endpoint an
+uptime monitor already polls is the simplest mechanism that cannot itself fail
+silently.
+
+| Alert | Severity | Threshold | Why that number |
+|---|---|---|---|
+| `NO_WORKER` | critical | no heartbeat | Everything asynchronous is stopped |
+| `WORKER_STALE` | warning | >90s | 3 missed beats; one missed beat is a GC pause |
+| `DATABASE_DOWN` / `REDIS_DOWN` | critical | health check fails | — |
+| `QUEUE_BACKLOG` | warning / critical | 500 / 5,000 waiting | Normal after a search; 5,000 means it cannot keep up |
+| `DEAD_LETTER` | warning | ≥10 | Exhausted retries; will not self-heal |
+| `QUEUE_PAUSED` | warning | any | Often left over from an incident |
+| `GMAIL_AUTH_REQUIRED` | critical | grant revoked | Only a human can fix it |
+| `GMAIL_BLOCKED` | critical | 5 consecutive failures | — |
+| `GMAIL_DEGRADED` | warning | 1–4 failures | Still sending |
+| `HIGH_SEND_FAILURE_RATE` | critical | ≥20% of ≥10 sends | 1% would fire constantly; 1-in-5 is a provider problem |
+| `INBOX_SYNC_STALE` | warning | >45min | Sync runs every 10min; replies not being detected |
+| `STUCK_CAMPAIGN` | warning | RUNNING, nothing sent 26h | >24h so a daily limit is not mistaken for a stall |
+| `OUTBOUND_PAUSED` | warning | switch thrown | So a pause is never forgotten |
+
+---
+
 ## 3. Emergency controls
 
 `POST /api/ops/controls` — OWNER/ADMIN only, every change audited.

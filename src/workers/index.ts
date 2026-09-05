@@ -32,6 +32,7 @@ import {
 } from '@/modules/jobs/processors';
 import { processExport } from '@/modules/export/worker';
 import { processCampaignTick, processSendEmail } from '@/modules/email/worker';
+import { countJob, startHeartbeat } from '@/modules/ops/heartbeat';
 
 const log = logger().child({ component: 'worker-main' });
 
@@ -108,9 +109,25 @@ function startWorkers(): void {
     ),
     createWorker(QUEUE_NAMES.maintenance, (job) => processMaintenance(job.data, job.id)),
   );
+
+  /**
+   * Liveness, so an operator can distinguish "no jobs to do" from "no worker
+   * running" — which look identical from the dashboard and have opposite
+   * remedies.
+   */
+  stopHeartbeat = startHeartbeat(Object.values(QUEUE_NAMES));
+
+  // Job counters feed the heartbeat. Attached to the queue events rather than
+  // wrapped around each processor, so no processor can be added later that
+  // forgets to count.
+  for (const handle of handles) {
+    handle.events.on('completed', () => countJob('processed'));
+    handle.events.on('failed', () => countJob('failed'));
+  }
 }
 
 let shuttingDown = false;
+let stopHeartbeat: (() => Promise<void>) | null = null;
 
 /**
  * Drains and exits.
@@ -124,6 +141,10 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
 
   log.info({ signal }, 'Shutting down; draining in-flight jobs');
+
+  // Removed first, so a deliberately stopped worker reads as gone immediately
+  // rather than appearing alive for another TTL while it drains.
+  if (stopHeartbeat) await stopHeartbeat().catch(() => undefined);
 
   const drain = Promise.allSettled([
     ...handles.map((handle) => handle.worker.close()),

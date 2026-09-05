@@ -60,7 +60,7 @@ export const POST = handler(
       await getQueue(QUEUE_NAMES.email).add(
         'campaign-tick',
         { organizationId: tenant.organizationId, campaignId },
-        { jobId: `${tickJobId(campaignId)}:start:${Date.now()}` },
+        { jobId: `${tickJobId(campaignId)}~start~${Date.now()}` },
       );
 
       logger.info({ campaignId, queued: result.queued }, 'Campaign started');
@@ -72,7 +72,7 @@ export const POST = handler(
       await getQueue(QUEUE_NAMES.email).add(
         'campaign-tick',
         { organizationId: tenant.organizationId, campaignId },
-        { jobId: `${tickJobId(campaignId)}:resume:${Date.now()}` },
+        { jobId: `${tickJobId(campaignId)}~resume~${Date.now()}` },
       );
       return { status: 'RUNNING' };
     }
