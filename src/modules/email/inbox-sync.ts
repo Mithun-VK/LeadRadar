@@ -43,6 +43,7 @@ import { applyLeadEvent, markEmailInvalid, recordTouch } from '@/modules/crm/lea
 import { ensureSystemActivity } from '@/modules/crm/activities';
 
 import { accessTokenFor } from './gmail-account';
+import { advanceCursor, recordFailure, recordSuccess, resumeFrom } from './gmail-health';
 import { actionsFor, classifyIntent, type IntentResult } from './intent';
 import { suppress } from './suppression';
 
@@ -51,6 +52,14 @@ export const BODY_RETENTION_DAYS = 90;
 
 /** How far back a sync looks when it has never run. */
 const INITIAL_LOOKBACK_DAYS = 7;
+/**
+ * Hard ceiling on how far back a sync will ever look.
+ *
+ * Bounds the worst case if the cursor is lost, restored from an old backup, or
+ * never advanced: the query stays a fixed size instead of growing until Gmail's
+ * quota refuses it.
+ */
+const MAX_LOOKBACK_DAYS = 30;
 
 export interface SyncResult {
   readonly fetched: number;
@@ -83,7 +92,13 @@ export async function syncInbox(
 
   const account = await db().gmailAccount.findFirst({
     where: { organizationId: tenant.organizationId, invalidatedAt: null },
-    select: { id: true, emailAddress: true, grantedScopes: true, lastUsedAt: true },
+    select: {
+      id: true,
+      emailAddress: true,
+      grantedScopes: true,
+      lastUsedAt: true,
+      inboxCursor: true,
+    },
   });
 
   if (!account) {
@@ -104,17 +119,24 @@ export async function syncInbox(
     return { fetched: 0, matched: 0, stored: 0, replies: 0, skippedNoScope: true };
   }
 
-  // Resume from the newest message already stored, so a re-sync is cheap and
-  // idempotent rather than re-reading a week every time.
-  const latest = await db().emailConversation.findFirst({
-    where: { organizationId: tenant.organizationId, direction: 'INBOUND' },
-    orderBy: { receivedAt: 'desc' },
-    select: { receivedAt: true },
-  });
-
-  const since =
-    latest?.receivedAt ??
-    new Date(Date.now() - INITIAL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  /**
+   * Resume from the PERSISTED cursor, clamped.
+   *
+   * This previously derived the resume point from the newest stored inbound
+   * message, which advances only when something matched. A mailbox that receives
+   * no matching replies therefore never advanced, and the query window grew by a
+   * day every day: an organization whose last reply was six months ago would ask
+   * Gmail for a 180-day window every ten minutes, until the quota refused it and
+   * reply detection stopped silently. The clamp bounds the worst case; the
+   * cursor, advanced after every successful sync below, prevents it arising.
+   */
+  const startedAt = new Date();
+  const since = resumeFrom(
+    account.inboxCursor,
+    startedAt,
+    MAX_LOOKBACK_DAYS,
+    INITIAL_LOOKBACK_DAYS,
+  );
 
   const accessToken = await accessTokenFor(account.id, provider);
   const fetched = await provider.fetchInbox({
@@ -124,9 +146,15 @@ export async function syncInbox(
   });
 
   if (!fetched.ok) {
-    throw fetched.error instanceof AppError
-      ? fetched.error
-      : new AppError({ code: 'PROVIDER_UNAVAILABLE', message: 'Inbox fetch failed' });
+    const error =
+      fetched.error instanceof AppError
+        ? fetched.error
+        : new AppError({ code: 'PROVIDER_UNAVAILABLE', message: 'Inbox fetch failed' });
+
+    // Recorded before rethrowing, so a repeatedly failing sync becomes visible as
+    // DEGRADED and then BLOCKED rather than only as log noise.
+    await recordFailure(account.id, error.code, error.safeMessage ?? null);
+    throw error;
   }
 
   const messages = fetched.value;
@@ -151,10 +179,18 @@ export async function syncInbox(
     if (outcome.isReply) replies += 1;
   }
 
-  log.info(
-    { fetched: messages.length, matched, stored, replies },
-    'Inbox sync complete',
-  );
+  /**
+   * Advance the cursor to when the sync STARTED, not to now.
+   *
+   * A message that arrived while the sync was running would otherwise fall in the
+   * gap between the two instants and never be read. Re-reading a few seconds of
+   * overlap is free — `recordInboundMessage` is idempotent on
+   * (organizationId, messageId) — whereas a missed reply is not recoverable.
+   */
+  await advanceCursor(account.id, startedAt);
+  await recordSuccess(account.id, 'sync', startedAt);
+
+  log.info({ fetched: messages.length, matched, stored, replies }, 'Inbox sync complete');
 
   return { fetched: messages.length, matched, stored, replies, skippedNoScope: false };
 }

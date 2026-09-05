@@ -18,6 +18,7 @@ import { env } from '@/lib/env';
 import { AppError } from '@/lib/errors';
 import { logger } from '@/lib/logger';
 import { db, type TenantContext } from '@/modules/database/client';
+import { recordFailure, recordSuccess } from './gmail-health';
 import type { EmailSendProvider, OAuthTokens } from '@/modules/providers/contracts';
 
 /** Refresh this far before actual expiry, so a send never races the clock. */
@@ -337,6 +338,9 @@ export async function accessTokenFor(
     if (refreshed.error.isRetryable === false) {
       await invalidateAccount(row.id, refreshed.error.code);
     }
+    // Recorded whether or not the grant was invalidated: a run of transient
+    // refresh failures should surface as DEGRADED before it becomes an outage.
+    await recordFailure(row.id, refreshed.error.code, refreshed.error.safeMessage ?? null);
     throw refreshed.error;
   }
 
@@ -357,6 +361,9 @@ export async function accessTokenFor(
       }),
     },
   });
+
+  // A successful refresh is the authentication heartbeat, and clears any streak.
+  await recordSuccess(row.id, 'auth');
 
   return refreshed.value.accessToken;
 }

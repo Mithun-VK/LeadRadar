@@ -2,6 +2,21 @@
 
 How to connect the mailbox LeadRadar sends campaigns from.
 
+> ## Certification status
+>
+> | Capability | Status |
+> |---|---|
+> | OAuth, token refresh, send, inbox sync, reply matching, error classification, health telemetry | ✅ **MOCK VERIFIED** |
+> | Any of the above against Google | ⛔ **LIVE CERTIFICATION REQUIRED** |
+>
+> Every automated test in this repository runs against a mock this repository
+> also wrote. That proves our code is internally consistent. It proves nothing
+> about Google.
+>
+> **`npm run certify:gmail` is the only thing permitted to report LIVE GMAIL
+> VERIFIED**, and it *refuses to run against the mock* — it exits non-zero rather
+> than produce a green report that means nothing. See §7.
+
 ---
 
 ## Before you start: what you are granting
@@ -140,6 +155,57 @@ access at Google, which is a confusing place to discover a configuration error.
 The test can only send to the connected mailbox's own address. There is no
 recipient field, and the API has no recipient parameter: an
 arbitrary-recipient test endpoint would be an open relay with a friendly name.
+
+---
+
+## 7. Live certification
+
+Connecting a mailbox is not the same as proving it works. This is the step that
+moves Gmail from *implemented* to *certified*.
+
+```bash
+npm run certify:gmail            # connection, token exchange, real send
+# reply to the message from a DIFFERENT mailbox you control, then:
+npm run certify:gmail -- --sync  # inbox sync, reply matching, idempotency
+```
+
+**It refuses to run against the mock provider** and exits non-zero. That refusal
+is the point: a certification tool satisfiable by a mock converts "we have not
+tested this" into "we tested it and it passed", which is false and gets planned
+around.
+
+Every line it prints is labelled with what was actually proven:
+
+| Label | Meaning |
+|---|---|
+| `LIVE GMAIL VERIFIED` | Proven against Google, on this deployment, just now |
+| `FAILED` | Attempted and did not work |
+| `SKIPPED` | Not attempted — usually a missing scope |
+| `INFO` | Context, not a claim |
+
+### What it checks
+
+1. The provider is live, not a mock — otherwise it refuses
+2. A mailbox is connected and its grant is valid
+3. The send scope was granted; read scope reported separately
+4. **Google issues an access token from the stored refresh token** — proving the
+   credential is genuinely accepted now, not merely that a decryptable string is
+   stored
+5. The token belongs to the mailbox we recorded
+6. A real message is sent to **the connected mailbox's own address, and nowhere
+   else** — there is no recipient parameter
+7. A provider message id and thread id come back and are persisted
+8. `--sync`: the inbox is read, a reply is matched, and **a second sync of the
+   same window creates no duplicates**
+9. Provider health after the run
+
+### What it does NOT certify
+
+Deliverability, inbox placement, and sending reputation. Those are properties of
+your domain and history, not of this code, and no script can assert them.
+
+Check the **Sent folder** after step 6. An API 200 means Google accepted the
+request; the Sent folder is what proves it sent.
 
 ---
 

@@ -48,6 +48,10 @@ import type { AiProvider, EmailSendProvider } from '@/modules/providers/contract
 import { deriveOpportunityFlags } from '@/modules/scoring/flags';
 
 import { accessTokenFor, recordSend, remainingDailyQuota } from './gmail-account';
+import {
+  recordFailure as recordGmailFailure,
+  recordSuccess as recordGmailSuccess,
+} from './gmail-health';
 import { buildMimeMessage, generateMessageId } from './mime';
 import { personalize } from './personalization';
 import { advanceAfterSend, isTerminalLeadStatus } from './sequence';
@@ -502,6 +506,20 @@ export async function sendCampaignEmail(
       });
     }
 
+    /**
+     * A provider rejection counts against health; a rejection of the ADDRESS does
+     * not. A bounce means that recipient is undeliverable, not that Gmail is
+     * unwell — counting it would drive the mailbox to BLOCKED for having done its
+     * job, and stop every other campaign.
+     */
+    if (result.error.code !== 'PROVIDER_BAD_REQUEST') {
+      await recordGmailFailure(
+        account.id,
+        result.error.code,
+        result.error.safeMessage ?? null,
+      );
+    }
+
     log.warn({ code: result.error.code, messageId: message.id }, 'Send failed');
 
     return {
@@ -558,6 +576,8 @@ export async function sendCampaignEmail(
   });
 
   await recordSend(account.id);
+  // Clears any failure streak: one accepted message means Gmail is working again.
+  await recordGmailSuccess(account.id, 'send', sentAt);
 
   log.info({ messageId: message.id, mocked: input.provider.isMock }, 'Email sent');
 

@@ -2,6 +2,12 @@
 
 Outbound sending, inbound reply detection, and the boundaries between them.
 
+> **Verification status.** Everything described here is **MOCK VERIFIED** — 756
+> unit tests, 34 integration, and 114 end-to-end assertions, all against a mock
+> this repository also wrote. None of it has run against Google.
+> **LIVE CERTIFICATION REQUIRED**: `npm run certify:gmail`. See
+> [GMAIL_SETUP.md §7](GMAIL_SETUP.md).
+
 ---
 
 ## 1. Outbound: nothing sends by itself
@@ -147,11 +153,58 @@ A campaign advances by scheduling **one message at a time**. That is what makes
 Runs every 10 minutes. Frequent enough that a reply stops the next follow-up in
 practice — sequences are spaced in days — without burning Gmail quota.
 
+### The sync cursor
+
+Each mailbox carries `inboxCursor`, advanced after **every successful sync**
+including one that stored nothing, and clamped to a 30-day maximum lookback.
+
+Both halves matter. This previously resumed from the newest *stored* inbound
+message, which advances only when something matches — so a mailbox receiving no
+matching replies never advanced, and its query window grew by a day every day. An
+organization whose last reply was six months ago would ask Gmail for a 180-day
+window every ten minutes until the quota refused it, and reply detection would
+then stop **silently**. The cursor prevents that arising; the clamp bounds it if
+the cursor is ever lost or restored from an old backup.
+
+The cursor advances to when the sync **started**, not to now: a message arriving
+mid-sync would otherwise fall in the gap and never be read. Re-reading a few
+seconds of overlap is free, because storage is idempotent on
+`(organizationId, messageId)`.
+
 ### Matching, strongest signal first
 
 1. **`In-Reply-To`** matches a `Message-ID` LeadRadar generated. Near-certain.
 2. **Thread id** matches a thread it started. Very strong.
 3. **Sender address** matches a lead it actually emailed. Strong.
+
+### Provider health
+
+Stored as timestamped **facts** — last auth, last send, last sync, last error,
+consecutive failures — with the state *derived* on read. A written status column
+would lose what matters during an incident: not "it is broken" but "it last
+worked at 14:02 and has failed eleven times since".
+
+| State | Meaning | Sending |
+|---|---|---|
+| `HEALTHY` | Recent success, no failure streak | continues |
+| `DEGRADED` | 1–4 consecutive failures | **continues** — one timeout is weather, not an outage |
+| `BLOCKED` | 5+ consecutive failures | stops |
+| `AUTH_REQUIRED` | Grant revoked or rejected | stops — retrying cannot fix it |
+| `DISCONNECTED` | No mailbox | stops |
+
+`AUTH_REQUIRED` outranks `BLOCKED` even though both are usually present together,
+because the remedies differ: retrying fixes one and never fixes the other.
+Reporting the fixable-looking state would send an operator to wait instead of to
+reconnect.
+
+A **hard bounce does not count against health**. It means that recipient is
+undeliverable, not that Gmail is unwell — counting it would drive a mailbox to
+`BLOCKED` for doing its job and stop every other campaign.
+
+Health never contains a token, an authorization code, or a raw provider response.
+`lastErrorDetail` is an already-safe message, truncated.
+
+### Matching (continued)
 
 There is deliberately **no fuzzy matching** on name or domain. A misattributed
 reply moves the wrong lead through the pipeline and stops the wrong campaign;

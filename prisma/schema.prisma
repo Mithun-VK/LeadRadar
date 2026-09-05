@@ -957,6 +957,47 @@ model GmailAccount {
   lastUsedAt  DateTime?
   updatedAt   DateTime  @updatedAt
 
+  // --- provider health telemetry -------------------------------------------
+  //
+  // Recorded so an operator can answer "is Gmail working?" without reading logs.
+  // Each is a fact with a timestamp rather than a computed status, because the
+  // useful question during an incident is "when did it last work?", and a
+  // single enum column cannot answer that.
+
+  /// Last successful token exchange or refresh — the authentication heartbeat.
+  lastAuthAt DateTime?
+  /// Last message Google actually accepted.
+  lastSendAt DateTime?
+  /// Last inbox sync that completed without error.
+  lastSyncAt DateTime?
+
+  /**
+   * Where the next inbox sync should resume from.
+   *
+   * Advanced after EVERY successful sync, including one that stored nothing.
+   * Deriving the cursor from the newest stored reply instead — as this did
+   * before — means a mailbox that receives no matching replies never advances,
+   * and its lookback window grows without bound: an organization whose last
+   * reply was six months ago would re-query a 180-day window every ten minutes
+   * until Gmail's quota cut it off, at which point real replies stop arriving.
+   */
+  inboxCursor DateTime?
+
+  /// Most recent provider failure. Cleared on the next success.
+  lastErrorAt   DateTime?
+  lastErrorCode String?
+  /// Safe, human-readable summary. Never a token, header, or raw response body.
+  lastErrorDetail String?
+
+  /**
+   * Consecutive failures since the last success.
+   *
+   * Drives the DEGRADED → BLOCKED transition. A count rather than a boolean
+   * because one timeout is noise and ten in a row is an outage, and the
+   * difference decides whether campaigns should be stopped automatically.
+   */
+  consecutiveFailures Int @default(0)
+
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   campaigns    Campaign[]
   messages     EmailMessage[]

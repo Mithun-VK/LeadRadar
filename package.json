@@ -36,7 +36,8 @@
     "verify:revenue": "tsx scripts/verify-revenue-engine.ts",
     "calibrate": "tsx scripts/calibrate-funnel.ts",
     "verify:query": "tsx scripts/verify-user-query.ts",
-    "verify:sequence": "tsx scripts/verify-sequence.ts"
+    "verify:sequence": "tsx scripts/verify-sequence.ts",
+    "certify:gmail": "tsx scripts/certify-gmail.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
