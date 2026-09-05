@@ -28,6 +28,14 @@ import { providers } from '@/modules/providers/registry';
 import { recordEvent } from '@/modules/database/repositories';
 
 import { sendCampaignEmail } from './send';
+import {
+  activeSteps,
+  dueLeads,
+  hasPendingWork,
+  nextDueAt,
+  nextStep,
+  stopSequence,
+} from './sequence';
 
 function tenantOf(payload: { organizationId: string; userId?: string }): TenantContext {
   return {
@@ -37,8 +45,12 @@ function tenantOf(payload: { organizationId: string; userId?: string }): TenantC
 }
 
 /** Deterministic id, so a duplicated job cannot produce a second email. */
-export function sendJobId(campaignId: string, businessId: string): string {
-  return `send:${campaignId}:${businessId}`;
+export function sendJobId(campaignId: string, businessId: string, stepNumber?: number): string {
+  // Step-scoped so step 2 is not mistaken for a duplicate of step 1. Omitted for
+  // single-send campaigns, keeping their ids byte-identical to before.
+  return stepNumber === undefined
+    ? `send:${campaignId}:${businessId}`
+    : `send:${campaignId}:${businessId}:s${stepNumber}`;
 }
 
 export function tickJobId(campaignId: string): string {
@@ -71,6 +83,9 @@ export async function processSendEmail(
   const outcome = await sendCampaignEmail(tenant, {
     campaignId: payload.campaignId,
     businessId: payload.businessId,
+    // Absent for a single-send campaign, which keeps the pre-sequence path.
+    ...(payload.stepId !== undefined && { stepId: payload.stepId }),
+    ...(payload.stepNumber !== undefined && { stepNumber: payload.stepNumber }),
     provider: registry.email,
     ai: registry.ai,
   });
@@ -174,14 +189,34 @@ export async function processCampaignTick(
     return { queued: 0, status: campaign.status };
   }
 
-  const next = await db().campaignLead.findFirst({
-    where: { campaignId: campaign.id, status: 'QUEUED' },
-    orderBy: { queuedAt: 'asc' },
-    select: { businessId: true },
-  });
+  const now = new Date();
+  const steps = await activeSteps(campaign.id);
+  const [due] = await dueLeads(campaign.id, now, 1);
 
-  if (!next) {
-    // Nothing left to send. Completing here rather than leaving it RUNNING means
+  if (!due) {
+    /**
+     * Nothing is due — but "nothing due" is not "nothing left".
+     *
+     * A sequence spends most of its life waiting: every lead may be sitting on a
+     * follow-up three days out. Completing the campaign here would abandon all of
+     * them. So the campaign finishes only when no lead has pending work at all,
+     * and otherwise the tick re-arms for whenever the soonest one comes due.
+     */
+    if (await hasPendingWork(campaign.id)) {
+      const wakeAt = await nextDueAt(campaign.id);
+      const delayMs = wakeAt ? Math.max(1_000, wakeAt.getTime() - now.getTime()) : 60_000;
+
+      await getQueue(QUEUE_NAMES.email).add(
+        'campaign-tick',
+        { organizationId: tenant.organizationId, campaignId: campaign.id },
+        { jobId: `${tickJobId(campaign.id)}:wait:${wakeAt?.getTime() ?? Date.now()}`, delay: delayMs },
+      );
+
+      log.info({ wakeAt, delayMs }, 'No step due yet; re-armed for the next one');
+      return { queued: 0, status: 'WAITING' };
+    }
+
+    // Genuinely finished. Completing here rather than leaving it RUNNING means
     // the operator sees a finished campaign instead of one that appears stuck.
     await db().campaign.update({
       where: { id: campaign.id },
@@ -200,15 +235,37 @@ export async function processCampaignTick(
     return { queued: 0, status: 'COMPLETED' };
   }
 
+  /**
+   * Which step this lead is owed.
+   *
+   * A campaign with no steps yields null, and the send runs with no `stepId` —
+   * which is precisely the pre-sequence single-send path. That is how existing
+   * campaigns keep behaving exactly as they did.
+   */
+  const step = nextStep(steps, due.currentStepNumber);
+
+  if (steps.length > 0 && !step) {
+    // The sequence is complete for this lead but the row was never closed —
+    // possible if steps were removed while it waited. Close it rather than
+    // looping on a lead that can never be advanced.
+    await stopSequence(due.campaignLeadId, 'SEQUENCE_COMPLETE', 'SENT');
+    log.info({ businessId: due.businessId }, 'No further steps for lead; sequence closed');
+    return { queued: 0, status: 'RUNNING' };
+  }
+
   await getQueue(QUEUE_NAMES.email).add(
     'send',
     {
       organizationId: tenant.organizationId,
       campaignId: campaign.id,
-      businessId: next.businessId,
+      businessId: due.businessId,
+      ...(step && { stepId: step.id, stepNumber: step.stepNumber }),
     } satisfies SendEmailPayload,
-    // Deterministic id: a duplicated tick cannot enqueue the same send twice.
-    { jobId: sendJobId(campaign.id, next.businessId) },
+    /**
+     * Deterministic id, now scoped to the step. A duplicated tick cannot enqueue
+     * the same step twice, and step 2 is not mistaken for a duplicate of step 1.
+     */
+    { jobId: sendJobId(campaign.id, due.businessId, step?.stepNumber) },
   );
 
   return { queued: 1, status: 'RUNNING' };

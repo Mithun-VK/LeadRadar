@@ -108,6 +108,14 @@ export const sendEmailPayloadSchema = z
     ...tenantFields,
     campaignId: z.string().min(1),
     businessId: z.string().min(1),
+    /**
+     * The sequence step this job sends. Absent for a single-send campaign — and
+     * absent from every payload written before sequences existed, which is why
+     * both are optional rather than nullable-with-default: a replayed job from
+     * the previous deployment must still parse.
+     */
+    stepId: z.string().min(1).optional(),
+    stepNumber: z.number().int().min(1).max(50).optional(),
   })
   .strict();
 

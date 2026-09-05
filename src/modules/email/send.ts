@@ -14,7 +14,9 @@
  *      the mock provider, and fails CLOSED if its state cannot be read
  *   1. Sending is enabled at all
  *   2. The campaign is still RUNNING (it may have been paused mid-flight)
- *   3. This lead has not already been sent to  — the duplicate-send defence
+ *   3. This lead has not already been sent to — the duplicate-send defence. For
+ *      a sequence this is scoped to the specific STEP, and the sequence has not
+ *      been terminated by a reply, unsubscribe, or bounce
  *   4. The address is still not suppressed  — re-checked at send time, not
  *      merely at enrolment, because someone may have unsubscribed in between
  *   5. The address is still syntactically valid
@@ -29,6 +31,11 @@
  * unsubscribes on Tuesday must not receive Wednesday's message. Re-checking at
  * the moment of sending is the difference between honouring an unsubscribe and
  * merely having honoured it once.
+ *
+ * Sequences make that argument sharper rather than changing it. The gap between
+ * step 1 and step 3 is measured in weeks, so every guard here runs again for
+ * every step, against live state — nothing is decided once at enrolment and
+ * trusted thereafter.
  */
 import { randomToken } from '@/lib/crypto';
 import { env } from '@/lib/env';
@@ -43,6 +50,7 @@ import { deriveOpportunityFlags } from '@/modules/scoring/flags';
 import { accessTokenFor, recordSend, remainingDailyQuota } from './gmail-account';
 import { buildMimeMessage, generateMessageId } from './mime';
 import { personalize } from './personalization';
+import { advanceAfterSend, isTerminalLeadStatus } from './sequence';
 import { checkSuppression, suppress } from './suppression';
 import { renderEmail } from './templates';
 
@@ -57,7 +65,8 @@ export type SendBlockReason =
   | 'MAILBOX_DAILY_LIMIT'
   | 'TEMPLATE_INCOMPLETE'
   | 'NO_MAILBOX'
-  | 'OUTBOUND_PAUSED';
+  | 'OUTBOUND_PAUSED'
+  | 'SEQUENCE_STOPPED';
 
 export interface SendOutcome {
   readonly sent: boolean;
@@ -87,6 +96,10 @@ function isSameUtcDay(a: Date | null, b: Date): boolean {
 export interface SendOneInput {
   readonly campaignId: string;
   readonly businessId: string;
+  /** The sequence step being sent. Absent for a single-send campaign. */
+  readonly stepId?: string | null;
+  /** 1-based step number, used to advance the lead after a confirmed send. */
+  readonly stepNumber?: number;
   readonly provider: EmailSendProvider;
   readonly ai?: AiProvider | null;
 }
@@ -181,7 +194,31 @@ export async function sendCampaignEmail(
   }
 
   // --- 3. never send twice --------------------------------------------------
-  if (campaignLead.status === 'SENT' || campaignLead.sentAt !== null) {
+  /**
+   * A sequence step is identified by `input.stepId`. Its absence means this is a
+   * single-send campaign, and the checks below are exactly what they were before
+   * sequences existed — deliberately, because every campaign created before this
+   * feature has no steps and must not acquire follow-up behaviour retroactively.
+   */
+  const isSequenceStep = input.stepId != null;
+
+  /**
+   * Terminal lead states end a sequence permanently.
+   *
+   * Checked FIRST for a sequence, because a lead that replied between step 1 and
+   * step 2 sits at status REPLIED with `sentAt` set — and reporting that as
+   * "already sent" would hide the far more important fact that they answered.
+   * `stopCampaignsForLead` moves PENDING/QUEUED/SENT enrolments to REPLIED, so
+   * this is the check that makes reply-termination bite for follow-ups.
+   */
+  if (isSequenceStep && isTerminalLeadStatus(campaignLead.status)) {
+    return blocked(
+      'SEQUENCE_STOPPED',
+      `The sequence stopped for this lead (${campaignLead.status.toLowerCase()}).`,
+    );
+  }
+
+  if (!isSequenceStep && (campaignLead.status === 'SENT' || campaignLead.sentAt !== null)) {
     return blocked('ALREADY_SENT', 'This lead has already been emailed by this campaign.');
   }
 
@@ -189,16 +226,25 @@ export async function sendCampaignEmail(
     where: {
       campaignId: input.campaignId,
       businessId: input.businessId,
+      // For a sequence, "already sent" is scoped to THIS step — step 1 having
+      // been sent is a precondition for step 2, not an objection to it.
+      ...(isSequenceStep ? { campaignStepId: input.stepId } : {}),
       status: { in: ['SENT', 'SENDING'] },
     },
     select: { id: true },
   });
 
   if (existingMessage) {
-    // Belt and braces against a duplicated job: the unique constraint on
-    // (campaignId, businessId) prevents double enrolment, and this prevents a
-    // second message even if the lead row were somehow reset.
-    return blocked('ALREADY_SENT', 'A message to this lead already exists for this campaign.');
+    // Belt and braces against a duplicated job. The authoritative guard is the
+    // unique constraint on (campaignId, businessId, campaignStepId), which the
+    // INSERT below hits before the provider is ever called; this read merely
+    // turns the common case into a clean outcome instead of a caught violation.
+    return blocked(
+      'ALREADY_SENT',
+      isSequenceStep
+        ? 'This step has already been sent to this lead.'
+        : 'A message to this lead already exists for this campaign.',
+    );
   }
 
   /**
@@ -391,13 +437,41 @@ export async function sendCampaignEmail(
       status: 'SENDING',
       messageIdHeader,
       unsubscribeToken,
+      // Carries the unique constraint that makes a concurrent duplicate
+      // impossible: (campaignId, businessId, campaignStepId).
+      campaignStepId: input.stepId ?? null,
       mocked: input.provider.isMock,
       queuedAt: campaignLead.queuedAt ?? now,
       attempts: 1,
       events: { create: { type: 'SEND_ATTEMPTED', detail: `To ${recipient}` } },
     },
     select: { id: true },
+  }).catch((error: unknown) => {
+    /**
+     * The concurrency control, resolved by the database.
+     *
+     * P2002 is a unique violation on (campaignId, businessId, campaignStepId):
+     * another worker claimed this exact step microseconds earlier and is sending
+     * it now. Losing that race is a correct outcome, not an error — this worker
+     * simply stops, having sent nothing.
+     *
+     * Reported as ALREADY_SENT rather than rethrown, so BullMQ does not retry a
+     * job whose work another worker is already doing.
+     */
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { code?: string }).code === 'P2002'
+    ) {
+      return null;
+    }
+    throw error;
   });
+
+  if (!message) {
+    log.info('Lost the race to claim this step; another worker is sending it');
+    return blocked('ALREADY_SENT', 'Another worker is already sending this step.');
+  }
 
   let accessToken: string;
   try {
@@ -453,10 +527,26 @@ export async function sendCampaignEmail(
       },
     });
 
-    await tx.campaignLead.update({
-      where: { id: campaignLead.id },
-      data: { status: 'SENT', sentAt },
-    });
+    /**
+     * Advance the sequence, or close it.
+     *
+     * For a sequence this sets the lead back to QUEUED with `nextStepAt` when a
+     * further step remains, and to SENT only when none does. For a single-send
+     * campaign it is the same flat `SENT` write as before.
+     *
+     * Deliberately inside the same transaction as the message update: a crash
+     * between "message SENT" and "lead advanced" would otherwise leave the lead
+     * eligible for a step it already received, and only the unique constraint
+     * would stand between that and a duplicate.
+     */
+    if (isSequenceStep && input.stepNumber !== undefined) {
+      await advanceAfterSend(campaignLead.id, campaign.id, input.stepNumber, sentAt, tx);
+    } else {
+      await tx.campaignLead.update({
+        where: { id: campaignLead.id },
+        data: { status: 'SENT', sentAt },
+      });
+    }
 
     await tx.campaign.update({
       where: { id: campaign.id },

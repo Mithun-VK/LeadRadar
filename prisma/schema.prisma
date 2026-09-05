@@ -1103,12 +1103,29 @@ model CampaignLead {
   queuedAt   DateTime?
   sentAt     DateTime?
 
+  /// Highest step number successfully sent to this lead. 0 = nothing sent yet.
+  ///
+  /// Advanced only after a send is confirmed, so a crash between send and
+  /// advance leaves the lead retryable rather than silently skipping a step.
+  /// The unique constraint on EmailMessage is what prevents that retry from
+  /// producing a second copy.
+  currentStepNumber Int @default(0)
+
+  /// When the next step becomes due, in UTC.
+  ///
+  /// Null means nothing is scheduled: either the sequence finished, or the lead
+  /// reached a terminal state. Indexed because the scheduler's central query is
+  /// "which leads are due now", and without an index that is a full scan on every
+  /// tick.
+  nextStepAt DateTime?
+
   campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@unique([campaignId, businessId])
   @@index([campaignId, status])
   @@index([businessId])
+  @@index([status, nextStepAt])
   @@map("campaign_leads")
 }
 
@@ -1163,12 +1180,30 @@ model EmailMessage {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// Which sequence step produced this message. Null for a single-send campaign
+  /// or a test message, both of which predate sequences.
+  campaignStepId String?
+
   organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   campaign     Campaign?     @relation(fields: [campaignId], references: [id], onDelete: SetNull)
   business     Business?     @relation(fields: [businessId], references: [id], onDelete: SetNull)
   gmailAccount GmailAccount? @relation(fields: [gmailAccountId], references: [id], onDelete: SetNull)
+  campaignStep CampaignStep? @relation(fields: [campaignStepId], references: [id], onDelete: SetNull)
   events       EmailEvent[]
 
+  /**
+   * The duplicate-send defence for sequences, and the concurrency control.
+   *
+   * The message row is INSERTed as SENDING *before* the provider is called, so
+   * this constraint is what makes two workers racing the same (lead, step)
+   * safe: the second INSERT fails and that worker never reaches the send. No
+   * advisory lock, no SELECT FOR UPDATE — the database decides, atomically.
+   *
+   * Postgres treats NULLs as distinct, so this does not constrain the pre-existing
+   * single-send rows (campaignStepId null). Those remain guarded by
+   * CampaignLead.sentAt, exactly as before.
+   */
+  @@unique([campaignId, businessId, campaignStepId])
   @@index([organizationId, status, createdAt])
   @@index([campaignId, status])
   @@index([businessId])
@@ -1952,6 +1987,7 @@ model CampaignStep {
 
   campaign Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   template EmailTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  messages EmailMessage[]
 
   @@unique([campaignId, stepNumber])
   @@index([campaignId, active])

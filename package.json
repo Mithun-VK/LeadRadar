@@ -35,7 +35,8 @@
     "verify:outreach": "tsx scripts/verify-outreach.ts",
     "verify:revenue": "tsx scripts/verify-revenue-engine.ts",
     "calibrate": "tsx scripts/calibrate-funnel.ts",
-    "verify:query": "tsx scripts/verify-user-query.ts"
+    "verify:query": "tsx scripts/verify-user-query.ts",
+    "verify:sequence": "tsx scripts/verify-sequence.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

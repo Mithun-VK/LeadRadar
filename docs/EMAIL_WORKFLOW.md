@@ -25,9 +25,13 @@ Every check between "a lead is queued" and "an email leaves" lives in one functi
 across a worker, a service, and a route handler is one where someone eventually
 adds a fourth call site that skips two of them.
 
+0. **The outbound kill switch is not thrown** — checked first, applies even to the
+   mock provider, and fails *closed* if its state cannot be read
 1. Sending is enabled at all
 2. The campaign is still `RUNNING`
-3. This lead has not already been sent to
+3. This lead has not already been sent to. For a sequence this is scoped to the
+   specific **step**, and the sequence has not been terminated by a reply,
+   unsubscribe, or bounce
 4. **The address is still not suppressed** — re-checked here, not only at enrolment
 5. The address is still syntactically valid
 6. The campaign's daily limit has room
@@ -39,6 +43,92 @@ checking again costs a query — but a campaign can sit queued for days, and som
 who unsubscribes on Tuesday must not receive Wednesday's message. Re-checking at
 the moment of sending is the difference between *honouring* an unsubscribe and
 *having honoured it once*.
+
+Sequences sharpen that argument rather than changing it. The gap between step 1
+and step 4 is measured in weeks, so **every guard runs again for every step**,
+against live state. Nothing is decided once at enrolment and trusted thereafter.
+
+---
+
+## 1a. Follow-up sequences
+
+A campaign may carry an ordered list of `CampaignStep` rows. **A campaign with no
+steps is a single send** — which is every campaign created before this feature
+existed, and they behave exactly as they always did.
+
+```
+Step 1  day 0   initial email
+Step 2  +2 days follow-up
+Step 3  +3 days follow-up
+Step 4  +5 days final
+        then stop
+```
+
+`delayDays` is relative to the **previous** step, not to enrolment, so inserting a
+step does not silently reschedule every later one.
+
+### Scheduling
+
+One step at a time. After a step sends, the lead returns to `QUEUED` with
+`nextStepAt` set; the campaign tick wakes when the soonest lead is due.
+
+The engine deliberately does **not** lay the whole sequence out in Redis at
+activation. A queue full of scheduled sends is nearly impossible to stop, and
+"pause" has to actually pause. With one-at-a-time scheduling, pausing simply means
+the chain stops advancing.
+
+A campaign completes only when **no lead has pending work** — not when the first
+pass finishes. Otherwise every scheduled follow-up would be silently abandoned.
+
+### What stops a sequence
+
+| Event | Effect | Mechanism |
+|---|---|---|
+| Reply | Stops permanently | `stopCampaignsForLead` sets the enrolment `REPLIED`; the send path treats it as terminal |
+| Unsubscribe | Stops permanently, address suppressed | Suppression re-checked at every step |
+| Bounce | Stops permanently, address suppressed | Hard bounce suppresses automatically |
+| Campaign paused | Stops until resumed | Guard 2 |
+| Outbound kill switch | Stops immediately, org-wide | Guard 0 |
+| Steps exhausted | Lead marked `SENT` | `nextStep()` returns null |
+
+Reply termination works without the inbox-sync code knowing sequences exist: a
+waiting lead sits at `QUEUED`, and `stopCampaignsForLead` already targets
+`PENDING`/`QUEUED`/`SENT`.
+
+### Duplicate sends are impossible by construction
+
+There is **no lock and no `SELECT FOR UPDATE`**. `EmailMessage` carries a unique
+constraint on `(campaignId, businessId, campaignStepId)`, and its row is inserted
+as `SENDING` **before** the provider is called.
+
+Two workers racing the same step therefore resolve in the database: one insert
+wins, the other raises a unique violation and never reaches the send. Verified —
+`verify:sequence` runs two concurrent sends of the same step and asserts exactly
+one message results.
+
+This also covers the nastier case: a worker that sends successfully then dies
+before recording the result. The row already exists in `SENDING`, so a retry
+collides and refuses. That leaves a message whose delivery is *unknown*, which is
+recoverable — a duplicate in a stranger's inbox is not.
+
+### Timezones
+
+`delayDays` is added in **epoch milliseconds**, never via local-date arithmetic.
+A follow-up interval must not shift because a worker moved region or a host
+observed daylight saving. Asserted across the European DST transition.
+
+### Managing steps
+
+`GET` / `PUT /api/campaigns/{id}/steps`. `PUT` replaces the whole sequence in one
+transaction — a sequence is meaningful only as an ordered whole, and per-step
+edits would let a client observe it mid-rename with two step-2s or a gap.
+
+The sequence is **frozen while a campaign is `RUNNING`**: leads are mid-flight with
+a `currentStepNumber` pointing into this exact list, and rewriting it underneath
+them would re-send to some leads and skip for others. Pause first.
+
+Capped at 10 steps. A twelve-touch sequence to a cold prospect is harassment
+however it is scheduled.
 
 ### Pacing
 

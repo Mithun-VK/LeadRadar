@@ -461,7 +461,17 @@ export async function activateCampaign(
   const queued = await db().$transaction(async (tx) => {
     const { count } = await tx.campaignLead.updateMany({
       where: { campaignId, status: 'PENDING' },
-      data: { status: 'QUEUED', queuedAt: new Date() },
+      data: {
+        status: 'QUEUED',
+        queuedAt: new Date(),
+        /**
+         * `nextStepAt: null` means "due immediately" to the scheduler, so step 1
+         * goes out as soon as the worker picks it up. Reset explicitly rather
+         * than left as-is, because re-activating a campaign whose leads carry a
+         * stale future date would otherwise silently delay the first send.
+         */
+        nextStepAt: null,
+      },
     });
 
     await tx.campaign.update({
