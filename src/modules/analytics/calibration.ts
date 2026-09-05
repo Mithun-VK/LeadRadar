@@ -81,9 +81,23 @@ async function outcomesFor(
   field: 'opportunityScore' | 'websiteQualityScore',
   bucket: ScoreBucket,
 ): Promise<BucketOutcome> {
+  /**
+   * Only leads with at least one REAL send count.
+   *
+   * `leadStatus` is advanced by the verification scripts, which send through the
+   * mock provider — so a lead sitting at WON may have got there in a test run
+   * that contacted nobody. Counting those as commercial evidence would mean
+   * reporting a win rate derived from synthetic data, which is precisely the
+   * claim this module exists to make honestly.
+   *
+   * `EmailMessage.mocked` is the discriminator, and it is the only reliable one:
+   * nothing else in the row distinguishes a message that reached a person from
+   * one that reached an in-process fake.
+   */
   const base = {
     organizationId: tenant.organizationId,
     [field]: { gte: bucket.min, lte: bucket.max },
+    emailMessages: { some: { mocked: false } },
   };
 
   const [leads, contacted, replied, meetings, won] = await Promise.all([
