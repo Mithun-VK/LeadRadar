@@ -13,11 +13,11 @@ Operating LeadRadar against real infrastructure. Everything here describes
 Which mode you are in is the single most important operational fact, and the
 dashboard states it on every page.
 
-| Mode | Configuration | What happens |
-|---|---|---|
-| **Mock** | `MOCK_EXTERNAL_APIS=true` | Everything runs. No message leaves the process. Business data is fabricated. **Rejected in production** — the app refuses to boot. |
-| **Live, sending off** | `MOCK_EXTERNAL_APIS=false`, `EMAIL_SENDING_ENABLED=false` | Real discovery, crawling, scoring. **No outbound email is possible.** The safe default for a first production deploy. |
-| **Live, sending on** | both above plus a connected mailbox | Real email reaches real people. |
+| Mode                  | Configuration                                             | What happens                                                                                                                       |
+| --------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| **Mock**              | `MOCK_EXTERNAL_APIS=true`                                 | Everything runs. No message leaves the process. Business data is fabricated. **Rejected in production** — the app refuses to boot. |
+| **Live, sending off** | `MOCK_EXTERNAL_APIS=false`, `EMAIL_SENDING_ENABLED=false` | Real discovery, crawling, scoring. **No outbound email is possible.** The safe default for a first production deploy.              |
+| **Live, sending on**  | both above plus a connected mailbox                       | Real email reaches real people.                                                                                                    |
 
 Boot fails fast rather than degrading: mock mode in production is refused, and
 live mode without credentials is refused. There is no silent fallback — a
@@ -177,15 +177,15 @@ spam-filter trigger.
 
 ### Health endpoints
 
-| Endpoint | Auth | Depth | Use |
-|---|---|---|---|
-| `GET /api/health/live` | public | **none** — no DB, no Redis | Container liveness. Restart on failure. |
-| `GET /api/health/ready` | public | DB + Redis | Load-balancer readiness. 503 when degraded. |
-| `GET /api/health` | public | DB + Redis | Legacy combined check. |
-| `GET /api/ops/status` | **session** | everything | The operator's screen. |
+| Endpoint                | Auth        | Depth                      | Use                                         |
+| ----------------------- | ----------- | -------------------------- | ------------------------------------------- |
+| `GET /api/health/live`  | public      | **none** — no DB, no Redis | Container liveness. Restart on failure.     |
+| `GET /api/health/ready` | public      | DB + Redis                 | Load-balancer readiness. 503 when degraded. |
+| `GET /api/health`       | public      | DB + Redis                 | Legacy combined check.                      |
+| `GET /api/ops/status`   | **session** | everything                 | The operator's screen.                      |
 
-Liveness is deliberately shallow. It answers *"should this container be
-restarted?"*, and restarting a healthy web process because Postgres blipped turns
+Liveness is deliberately shallow. It answers _"should this container be
+restarted?"_, and restarting a healthy web process because Postgres blipped turns
 a database wobble into an outage.
 
 `/api/ops/status` is authenticated because it reports queue depths, worker
@@ -252,12 +252,12 @@ campaign scheduler re-wakes running campaigns every 15 minutes.
 
 `/api/ops/status` → `gmail.state`:
 
-| State | Do |
-|---|---|
-| `DEGRADED` | Nothing. Still sending; watch it clear. |
-| `BLOCKED` | Check `lastErrorCode`. If rate limited, lower the campaign daily limit. |
-| `AUTH_REQUIRED` | **Reconnect.** Retrying cannot fix a revoked grant. |
-| `DISCONNECTED` | Connect a mailbox. |
+| State           | Do                                                                      |
+| --------------- | ----------------------------------------------------------------------- |
+| `DEGRADED`      | Nothing. Still sending; watch it clear.                                 |
+| `BLOCKED`       | Check `lastErrorCode`. If rate limited, lower the campaign daily limit. |
+| `AUTH_REQUIRED` | **Reconnect.** Retrying cannot fix a revoked grant.                     |
+| `DISCONNECTED`  | Connect a mailbox.                                                      |
 
 ### 9. Roll back a deployment
 
@@ -308,23 +308,23 @@ Evaluated on read at `/api/ops/status`. No alerting platform — an endpoint an
 uptime monitor already polls is the simplest mechanism that cannot itself fail
 silently.
 
-| Alert | Severity | Threshold | Why that number |
-|---|---|---|---|
-| `NO_WORKER` | critical | no heartbeat | Everything asynchronous is stopped |
-| `WORKER_STALE` | warning | >90s | 3 missed beats; one missed beat is a GC pause |
-| `DATABASE_DOWN` / `REDIS_DOWN` | critical | health check fails | — |
-| `QUEUE_BACKLOG` | warning / critical | 500 / 5,000 waiting | Normal after a search; 5,000 means it cannot keep up |
-| `DEAD_LETTER` | warning | ≥10 | Exhausted retries; will not self-heal |
-| `QUEUE_PAUSED` | warning | any | Often left over from an incident |
-| `GMAIL_AUTH_REQUIRED` | critical | grant revoked | Only a human can fix it |
-| `GMAIL_BLOCKED` | critical | 5 consecutive failures | — |
-| `GMAIL_DEGRADED` | warning | 1–4 failures | Still sending |
-| `HIGH_SEND_FAILURE_RATE` | critical | ≥20% of ≥10 sends | 1% would fire constantly; 1-in-5 is a provider problem |
-| `INBOX_SYNC_STALE` | warning | >45min | Sync runs every 10min; replies not being detected |
-| `STUCK_CAMPAIGN` | warning | RUNNING, nothing sent 26h | >24h so a daily limit is not mistaken for a stall |
-| `QUEUE_STALLED` | warning | oldest waiting job >15min | Depth alone misses a wedged queue with three old jobs in it |
-| `DISK_LOW` | warning / critical | <10 GB / <2 GB free | See §2c — this is the failure that looked healthy |
-| `OUTBOUND_PAUSED` | warning | switch thrown | So a pause is never forgotten |
+| Alert                          | Severity           | Threshold                 | Why that number                                             |
+| ------------------------------ | ------------------ | ------------------------- | ----------------------------------------------------------- |
+| `NO_WORKER`                    | critical           | no heartbeat              | Everything asynchronous is stopped                          |
+| `WORKER_STALE`                 | warning            | >90s                      | 3 missed beats; one missed beat is a GC pause               |
+| `DATABASE_DOWN` / `REDIS_DOWN` | critical           | health check fails        | —                                                           |
+| `QUEUE_BACKLOG`                | warning / critical | 500 / 5,000 waiting       | Normal after a search; 5,000 means it cannot keep up        |
+| `DEAD_LETTER`                  | warning            | ≥10                       | Exhausted retries; will not self-heal                       |
+| `QUEUE_PAUSED`                 | warning            | any                       | Often left over from an incident                            |
+| `GMAIL_AUTH_REQUIRED`          | critical           | grant revoked             | Only a human can fix it                                     |
+| `GMAIL_BLOCKED`                | critical           | 5 consecutive failures    | —                                                           |
+| `GMAIL_DEGRADED`               | warning            | 1–4 failures              | Still sending                                               |
+| `HIGH_SEND_FAILURE_RATE`       | critical           | ≥20% of ≥10 sends         | 1% would fire constantly; 1-in-5 is a provider problem      |
+| `INBOX_SYNC_STALE`             | warning            | >45min                    | Sync runs every 10min; replies not being detected           |
+| `STUCK_CAMPAIGN`               | warning            | RUNNING, nothing sent 26h | >24h so a daily limit is not mistaken for a stall           |
+| `QUEUE_STALLED`                | warning            | oldest waiting job >15min | Depth alone misses a wedged queue with three old jobs in it |
+| `DISK_LOW`                     | warning / critical | <10 GB / <2 GB free       | See §2c — this is the failure that looked healthy           |
+| `OUTBOUND_PAUSED`              | warning            | switch thrown             | So a pause is never forgotten                               |
 
 ---
 
@@ -336,12 +336,12 @@ do, the alerts exist and nobody is watching them.
 
 ### Which endpoint, and why they are different
 
-| Endpoint | Auth | Codes | Poll every | Use it for |
-|---|---|---|---|---|
-| `/api/health/live` | none | always 200 | 10s | **Restart decisions only.** Shallow by design |
-| `/api/health/ready` | none | 200 / **503** | 15s | **Load-balancer routing.** DB, Redis, disk |
-| `/api/health` | none | 200 / **503** | 30s | **Uptime monitoring.** Same checks, plus mock-mode |
-| `/api/ops/status` | session | always 200 | 60s | **Human dashboard.** Alerts, queues, Gmail, campaigns |
+| Endpoint            | Auth    | Codes         | Poll every | Use it for                                            |
+| ------------------- | ------- | ------------- | ---------- | ----------------------------------------------------- |
+| `/api/health/live`  | none    | always 200    | 10s        | **Restart decisions only.** Shallow by design         |
+| `/api/health/ready` | none    | 200 / **503** | 15s        | **Load-balancer routing.** DB, Redis, disk            |
+| `/api/health`       | none    | 200 / **503** | 30s        | **Uptime monitoring.** Same checks, plus mock-mode    |
+| `/api/ops/status`   | session | always 200    | 60s        | **Human dashboard.** Alerts, queues, Gmail, campaigns |
 
 The split is not cosmetic. **Never restart a container on a `/api/health/ready`
 failure**: readiness fails when PostgreSQL is unavailable, and restarting a
@@ -367,14 +367,14 @@ alert on `alerts[].severity == "critical"`.
 
 ### What should page someone
 
-| Condition | Where to see it | Severity |
-|---|---|---|
-| `/api/health` returns 503 for 2 consecutive polls | status code | page |
-| `/api/health` unreachable for 60s | connection | page |
-| any `alerts[].severity == "critical"` | `/api/ops/status` | page |
-| `checks.disk == "critical"` | `/api/health` | page — see §2c note below |
-| any `alerts[].severity == "warning"` | `/api/ops/status` | ticket, not a page |
-| `checks.disk == "unknown"` | `/api/health` | ticket — the disk is unmeasurable, which is not the same as fine |
+| Condition                                         | Where to see it   | Severity                                                         |
+| ------------------------------------------------- | ----------------- | ---------------------------------------------------------------- |
+| `/api/health` returns 503 for 2 consecutive polls | status code       | page                                                             |
+| `/api/health` unreachable for 60s                 | connection        | page                                                             |
+| any `alerts[].severity == "critical"`             | `/api/ops/status` | page                                                             |
+| `checks.disk == "critical"`                       | `/api/health`     | page — see §2c note below                                        |
+| any `alerts[].severity == "warning"`              | `/api/ops/status` | ticket, not a page                                               |
+| `checks.disk == "unknown"`                        | `/api/health`     | ticket — the disk is unmeasurable, which is not the same as fine |
 
 **Two consecutive polls, not one.** A single failed poll during a deploy or a
 connection reset is noise, and a monitor that pages on noise stops being read.
@@ -387,7 +387,7 @@ check here is `SELECT 1` — a read — so it returned 200 for the entire incide
 while every login hung for 317 seconds. A monitor watching it would have reported
 the system healthy throughout.
 
-Only the disk *state* is exposed, never the free-byte figure: this endpoint is
+Only the disk _state_ is exposed, never the free-byte figure: this endpoint is
 unauthenticated, and a capacity number is reconnaissance where a three-word state
 is not.
 
@@ -395,12 +395,12 @@ is not.
 
 Measured in `npm run drill:containers`, by stopping the real containers:
 
-| Failure | `live` | `ready` | `health` | Recovery |
-|---|---|---|---|---|
-| PostgreSQL stopped | 200 | **503** | **503** | Pool recovers in ~31s, no app restart |
-| Redis stopped | 200 | **503** | **503** | Client reconnects, no app restart |
-| Disk critical | 200 | **503** | **503** | Operator must free space |
-| Worker dead | 200 | 200 | 200 | **Not visible here** — only `/api/ops/status` |
+| Failure            | `live` | `ready` | `health` | Recovery                                      |
+| ------------------ | ------ | ------- | -------- | --------------------------------------------- |
+| PostgreSQL stopped | 200    | **503** | **503**  | Pool recovers in ~31s, no app restart         |
+| Redis stopped      | 200    | **503** | **503**  | Client reconnects, no app restart             |
+| Disk critical      | 200    | **503** | **503**  | Operator must free space                      |
+| Worker dead        | 200    | 200     | 200      | **Not visible here** — only `/api/ops/status` |
 
 The last row matters: a dead worker does not affect any health endpoint, because
 the web tier is genuinely healthy. Discovery, campaigns and reply detection are
@@ -417,11 +417,11 @@ strategy), so allow a 30s timeout on any monitor polling `ready` or `health`.
 
 `POST /api/ops/controls` — OWNER/ADMIN only, every change audited.
 
-| Control | Effect | Fails |
-|---|---|---|
-| `outbound` | Stops every campaign send instantly, including mock sends | **CLOSED** |
-| `ai` | Stops personalization and intent classification; deterministic fallbacks continue | open |
-| `crawler` | Stops discovery and crawling | open |
+| Control    | Effect                                                                            | Fails      |
+| ---------- | --------------------------------------------------------------------------------- | ---------- |
+| `outbound` | Stops every campaign send instantly, including mock sends                         | **CLOSED** |
+| `ai`       | Stops personalization and intent classification; deterministic fallbacks continue | open       |
+| `crawler`  | Stops discovery and crawling                                                      | open       |
 
 **Why outbound fails closed:** if the control state cannot be read, sending stops.
 An email that should have gone and did not is recoverable; one that should not
@@ -436,24 +436,24 @@ The switch is read on **every send** and is not cached — a brake with a
 
 ### Other stops
 
-| Situation | Action |
-|---|---|
-| One campaign misbehaving | Pause that campaign |
-| Mailbox compromised | Dashboard → Email → Disconnect. Running campaigns auto-pause. Then revoke at [myaccount.google.com/permissions](https://myaccount.google.com/permissions) |
-| Worker misbehaving | Stop the worker process. Queued jobs persist in Redis and resume |
-| Everything | `outbound` kill switch first, then investigate |
+| Situation                | Action                                                                                                                                                    |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| One campaign misbehaving | Pause that campaign                                                                                                                                       |
+| Mailbox compromised      | Dashboard → Email → Disconnect. Running campaigns auto-pause. Then revoke at [myaccount.google.com/permissions](https://myaccount.google.com/permissions) |
+| Worker misbehaving       | Stop the worker process. Queued jobs persist in Redis and resume                                                                                          |
+| Everything               | `outbound` kill switch first, then investigate                                                                                                            |
 
 ---
 
 ## 4. Routine operations
 
-| Job | Schedule | Purpose |
-|---|---|---|
-| `purge-google-snapshots` | `17 * * * *` | 30-day retention on Google-derived data |
-| `purge-email-bodies` | `23 4 * * *` | 90-day retention on inbound bodies |
-| `refresh-place-ids` | `0 3 * * *` | Free existence check |
-| `campaign-scheduler` | `*/15 * * * *` | Re-wakes campaigns stalled by a worker restart |
-| `inbox-sync` | `*/10 * * * *` | Reply detection |
+| Job                      | Schedule       | Purpose                                        |
+| ------------------------ | -------------- | ---------------------------------------------- |
+| `purge-google-snapshots` | `17 * * * *`   | 30-day retention on Google-derived data        |
+| `purge-email-bodies`     | `23 4 * * *`   | 90-day retention on inbound bodies             |
+| `refresh-place-ids`      | `0 3 * * *`    | Free existence check                           |
+| `campaign-scheduler`     | `*/15 * * * *` | Re-wakes campaigns stalled by a worker restart |
+| `inbox-sync`             | `*/10 * * * *` | Reply detection                                |
 
 Off-peak odd minutes are deliberate — avoids a thundering herd on the hour.
 
@@ -478,12 +478,12 @@ forever (observed: 317 seconds) because it writes a session row, while
 `DISK_LOW` — placed ahead of `DATABASE_DOWN` in the alert list on purpose, so
 when both fire the operator reads the cause before the symptom.
 
-| Free space | State | What it means |
-|---|---|---|
-| >10 GB | `ok` | The documented operational floor |
-| 2–10 GB | `warning` | Act today. A build or a log rotation eats a gigabyte unnoticed |
-| <2 GB | `critical` | Writes are at risk. Health returns 503 |
-| unmeasurable | `unknown` | **Not `ok`.** Check `df -h` by hand |
+| Free space   | State      | What it means                                                  |
+| ------------ | ---------- | -------------------------------------------------------------- |
+| >10 GB       | `ok`       | The documented operational floor                               |
+| 2–10 GB      | `warning`  | Act today. A build or a log rotation eats a gigabyte unnoticed |
+| <2 GB        | `critical` | Writes are at risk. Health returns 503                         |
+| unmeasurable | `unknown`  | **Not `ok`.** Check `df -h` by hand                            |
 
 **Fix, in order:**
 
@@ -502,7 +502,7 @@ response that deletes business records trades a recoverable outage for an
 unrecoverable one.
 
 **Scope limitation, stated plainly:** `checks.disk` measures the filesystem of
-the *application process*. If PostgreSQL runs on a separate host or volume — as
+the _application process_. If PostgreSQL runs on a separate host or volume — as
 it will in most real deployments — this check can read `ok` while the database's
 disk is full. Monitor the database host's disk separately. A monitoring signal
 whose scope is misunderstood is how this incident happened in the first place.
@@ -538,15 +538,15 @@ Check in order: worker running? · `outbound` kill switch? · daily limit reache
 
 ## 6. What to watch
 
-| Signal | Where | Threshold |
-|---|---|---|
-| Disk free | `/api/health` `checks.disk`, or `df -h` | **>10 GB** (critical below 2 GB) |
-| Bounce rate | Analytics | >2% — stop and clean the list |
-| Unsubscribe rate | Analytics | >0.5% — the message is wrong, not the volume |
-| Failed sends | Email page | any sustained run |
-| Queue depth | `/api/ops/status` `queues[].waiting` | growing = worker cannot keep up |
-| Oldest waiting job | `/api/ops/status` `queues[].oldestWaitingAgeMs` | >15min = stalled, whatever the depth |
-| Provider spend | Usage | against the configured budget |
+| Signal             | Where                                           | Threshold                                    |
+| ------------------ | ----------------------------------------------- | -------------------------------------------- |
+| Disk free          | `/api/health` `checks.disk`, or `df -h`         | **>10 GB** (critical below 2 GB)             |
+| Bounce rate        | Analytics                                       | >2% — stop and clean the list                |
+| Unsubscribe rate   | Analytics                                       | >0.5% — the message is wrong, not the volume |
+| Failed sends       | Email page                                      | any sustained run                            |
+| Queue depth        | `/api/ops/status` `queues[].waiting`            | growing = worker cannot keep up              |
+| Oldest waiting job | `/api/ops/status` `queues[].oldestWaitingAgeMs` | >15min = stalled, whatever the depth         |
+| Provider spend     | Usage                                           | against the configured budget                |
 
 Bounce and unsubscribe rates are **sending-reputation** signals, not vanity
 metrics. Sustained breaches degrade every future campaign, including good ones.
