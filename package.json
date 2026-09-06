@@ -40,7 +40,8 @@
     "certify:gmail": "tsx scripts/certify-gmail.ts",
     "load-test": "tsx scripts/load-test.ts",
     "verify:recovery": "tsx scripts/verify-recovery.ts",
-    "calibrate:scoring": "tsx scripts/calibrate-scoring.ts"
+    "calibrate:scoring": "tsx scripts/calibrate-scoring.ts",
+    "pentest:tenancy": "tsx scripts/pentest-tenancy.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -82,5 +83,8 @@
     "tsx": "^4.20.6",
     "typescript": "^5",
     "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.0"
   }
 }

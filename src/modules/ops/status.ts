@@ -27,6 +27,7 @@ import { queueDepths, type QueueDepth } from '@/modules/jobs/queues';
 import { gmailHealth, type GmailHealth } from '@/modules/email/gmail-health';
 import { allControls, type ControlState } from '@/modules/ops/controls';
 import { workerStatus, type WorkerStatus } from '@/modules/ops/heartbeat';
+import { diskHealth, type DiskHealth, type DiskState } from '@/modules/ops/disk';
 
 // ---------------------------------------------------------------------------
 // Thresholds
@@ -82,6 +83,7 @@ export interface OpsStatus {
     readonly redisLatencyMs: number | null;
   };
   readonly workers: WorkerStatus;
+  readonly disk: DiskHealth;
   readonly queues: readonly QueueDepth[];
   readonly gmail: GmailHealth;
   readonly controls: readonly ControlState[];
@@ -118,7 +120,7 @@ export async function opsStatus(tenant: TenantContext): Promise<OpsStatus> {
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const org = { organizationId: tenant.organizationId };
 
-  const [dbCheck, redisCheck, workers, queues, gmail, controls] = await Promise.all([
+  const [dbCheck, redisCheck, workers, queues, gmail, controls, disk] = await Promise.all([
     timed(() => databaseHealthy()).catch(() => ({ value: false, ms: null as number | null })),
     timed(() => redisHealthy()).catch(() => ({ value: false, ms: null as number | null })),
     workerStatus().catch(
@@ -150,6 +152,7 @@ export async function opsStatus(tenant: TenantContext): Promise<OpsStatus> {
         }) as GmailHealth,
     ),
     allControls(tenant).catch((): ControlState[] => []),
+    diskHealth(),
   ]);
 
   const [sent24h, failed24h, queuedMessages, runningCampaigns, stuckCampaigns] = await Promise.all([
@@ -189,6 +192,23 @@ export async function opsStatus(tenant: TenantContext): Promise<OpsStatus> {
   // Alerts
   // -------------------------------------------------------------------------
   const alerts: Alert[] = [];
+
+  /**
+   * Disk first, deliberately.
+   *
+   * When the disk filled to 0.62 GB, PostgreSQL blocked writes while reads kept
+   * succeeding — so DATABASE_DOWN never fired, and the true cause was the one
+   * thing nothing reported. Placing DISK_LOW ahead of the database alert means
+   * that when both fire, the operator reads the cause before the symptom.
+   */
+  if (disk.state === 'critical' || disk.state === 'warning') {
+    alerts.push({
+      severity: disk.state === 'critical' ? 'critical' : 'warning',
+      code: 'DISK_LOW',
+      message: disk.summary,
+      action: disk.action ?? 'Free disk space.',
+    });
+  }
 
   if (!dbCheck.value) {
     alerts.push({
@@ -343,6 +363,7 @@ export async function opsStatus(tenant: TenantContext): Promise<OpsStatus> {
       redisLatencyMs: redisCheck.ms,
     },
     workers,
+    disk,
     queues,
     gmail,
     controls,
@@ -378,16 +399,39 @@ export function liveness(): { status: 'ok'; uptimeSeconds: number } {
  */
 export async function readiness(): Promise<{
   status: 'ok' | 'degraded';
-  checks: { database: boolean; redis: boolean };
+  checks: { database: boolean; redis: boolean; disk: DiskState };
+  disk: { freeGb: number | null; summary: string };
 }> {
-  const [database, redis] = await Promise.all([
+  const [database, redis, disk] = await Promise.all([
     databaseHealthy().catch(() => false),
     redisHealthy().catch(() => false),
+    diskHealth(),
   ]);
 
-  if (!database || !redis) {
-    logger().warn({ database, redis }, 'Readiness check failed');
+  /**
+   * Critical disk makes readiness DEGRADED even though `SELECT 1` still passes.
+   *
+   * This is the specific lesson of the 0.62 GB incident: PostgreSQL blocked
+   * writes while reads kept succeeding, so a read-only probe reported 200 while
+   * every login hung. A readiness check that stays green in that state directs
+   * the operator away from the cause, which is worse than having no check.
+   *
+   * Only `critical` degrades. A `warning` is a signal to act, not a reason to
+   * pull the instance out of the load balancer.
+   */
+  const diskCritical = disk.state === 'critical';
+  const ready = database && redis && !diskCritical;
+
+  if (!ready) {
+    logger().warn(
+      { database, redis, disk: disk.state, freeGb: disk.freeGb },
+      'Readiness check failed',
+    );
   }
 
-  return { status: database && redis ? 'ok' : 'degraded', checks: { database, redis } };
+  return {
+    status: ready ? 'ok' : 'degraded',
+    checks: { database, redis, disk: disk.state },
+    disk: { freeGb: disk.freeGb, summary: disk.summary },
+  };
 }
