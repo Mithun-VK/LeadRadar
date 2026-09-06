@@ -851,15 +851,19 @@ export async function processScore(
       where: { businessId: business.id, isCurrent: true },
     });
 
-    for (const recommendation of recommendations) {
-      await tx.serviceRecommendation.create({
-        data: {
+    // `createMany`, not a loop of `create`. Each statement inside an interactive
+    // transaction is its own round trip while the transaction holds its locks,
+    // so a four-recommendation lead spent four round trips here for no reason.
+    // Under concurrency that is what pushed this transaction past its deadline.
+    if (recommendations.length > 0) {
+      await tx.serviceRecommendation.createMany({
+        data: recommendations.map((recommendation) => ({
           businessId: business.id,
           service: recommendation.service,
           strength: recommendation.strength,
           reasons: [...recommendation.reasons, recommendation.pitch],
           isCurrent: true,
-        },
+        })),
       });
     }
 
@@ -872,6 +876,23 @@ export async function processScore(
         opportunityFlags: flagNames(flagDetails),
       },
     });
+  },
+  {
+    /**
+     * 20s, not Prisma's 5s default.
+     *
+     * Measured: with two worker containers scoring concurrently against a
+     * contended database, a scoring job exceeded 5s (5180ms), exhausted its
+     * retries, and was lost to the dead-letter queue. The work itself is small —
+     * the time goes on waiting for connections and locks under load, which is
+     * exactly the condition a deadline should tolerate rather than fail on.
+     *
+     * A permanently lost scoring job is quiet damage: the lead keeps a stale
+     * score and nothing surfaces it, because the failure is in the queue and the
+     * lead still looks scored.
+     */
+    timeout: 20_000,
+    maxWait: 10_000,
   });
 
   if (payload.searchJobId && score.total >= 60) {

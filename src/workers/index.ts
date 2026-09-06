@@ -117,12 +117,26 @@ function startWorkers(): void {
    */
   stopHeartbeat = startHeartbeat(Object.values(QUEUE_NAMES));
 
-  // Job counters feed the heartbeat. Attached to the queue events rather than
-  // wrapped around each processor, so no processor can be added later that
-  // forgets to count.
+  /**
+   * Job counters feed the heartbeat. Attached to the WORKER, not to QueueEvents.
+   *
+   * `QueueEvents` is a queue-wide stream: it reports every completion on the
+   * queue, whoever performed it. Counting from it meant each worker incremented
+   * for its peers' jobs, so with two workers a 30-job batch was measured as 60 —
+   * and, far worse, a worker that had wedged and was processing nothing still
+   * reported a rising `processed` count while its peers worked. A liveness
+   * counter that cannot go quiet when the worker stops working is not a liveness
+   * counter.
+   *
+   * `worker.on(...)` fires only for jobs THIS process ran, which is the number
+   * the heartbeat claims to report.
+   *
+   * Still attached generically rather than wrapped around each processor, so no
+   * processor added later can forget to count.
+   */
   for (const handle of handles) {
-    handle.events.on('completed', () => countJob('processed'));
-    handle.events.on('failed', () => countJob('failed'));
+    handle.worker.on('completed', () => countJob('processed'));
+    handle.worker.on('failed', () => countJob('failed'));
   }
 }
 

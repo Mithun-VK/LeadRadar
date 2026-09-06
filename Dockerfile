@@ -25,6 +25,20 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 # ---------------------------------------------------------------------------
+# deps-prod — runtime dependencies only
+# ---------------------------------------------------------------------------
+#
+# The worker previously reused the full `deps` tree, which put vitest, eslint,
+# prettier, next and the Prisma CLI into the production image: 1.54GB, and every
+# devDependency advisory became a production advisory. `tsx` is the one dev tool
+# the worker genuinely needs at runtime, so it moved to `dependencies` and this
+# stage installs nothing else.
+FROM node:22-alpine AS deps-prod
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+# ---------------------------------------------------------------------------
 # builder — Prisma client + Next.js build
 # ---------------------------------------------------------------------------
 FROM node:22-alpine AS builder
@@ -104,9 +118,11 @@ RUN addgroup --system --gid 1001 nodejs \
  && adduser --system --uid 1001 --ingroup nodejs worker
 
 # The worker runs TypeScript through tsx rather than a compiled bundle, so it
-# needs the full dependency tree — `output: 'standalone'` traces only what the
-# Next.js server reaches.
-COPY --from=deps --chown=worker:nodejs /app/node_modules ./node_modules
+# needs real node_modules — `output: 'standalone'` traces only what the Next.js
+# server reaches, and the worker's entry point is not in that trace. It takes the
+# production-only tree: tsx is a runtime dependency, the rest of the dev toolchain
+# is not.
+COPY --from=deps-prod --chown=worker:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=worker:nodejs /app/node_modules/.prisma ./node_modules/.prisma
 COPY --chown=worker:nodejs package.json tsconfig.json ./
 COPY --chown=worker:nodejs src ./src
@@ -120,4 +136,15 @@ USER worker
 # costs another credit. `--init` in compose ensures the signal actually arrives.
 STOPSIGNAL SIGTERM
 
-CMD ["npx", "tsx", "src/workers/index.ts"]
+# `node` directly, NOT `npx tsx`.
+#
+# Measured: with `CMD ["npx", "tsx", ...]`, `docker stop -t 40` took 60s, the
+# container exited 143, and the shutdown handler logged nothing — the drain never
+# ran. `npx` and the `tsx` CLI shim each sit between the init process and node,
+# and neither forwards SIGTERM, so the signal never reached the process holding
+# the BullMQ locks. Every deploy was a hard kill, which is precisely the
+# behaviour the STOPSIGNAL above exists to avoid.
+#
+# `node --import tsx` makes node the direct child of the init process, so the
+# signal arrives where the handler is installed.
+CMD ["node", "--import", "tsx", "src/workers/index.ts"]

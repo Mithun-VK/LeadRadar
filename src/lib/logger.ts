@@ -15,6 +15,8 @@
  * queue work. Both are always present on child loggers created by the helpers
  * below, so an operator can follow one search end to end.
  */
+import { createRequire } from 'node:module';
+
 import { pino, type Logger as PinoLogger } from 'pino';
 
 import { env } from './env';
@@ -112,13 +114,39 @@ export function resetRedactionCache(): void {
   cachedSecrets = undefined;
 }
 
+/**
+ * Whether `pino-pretty` can actually be loaded.
+ *
+ * It is a devDependency and the production container is built with
+ * `--omit=dev`, so it is genuinely absent there. `pretty` is already false under
+ * `NODE_ENV=production`, but the two conditions are not the same thing: running
+ * the production image in mock mode — which is how the image is verified without
+ * real provider credentials — sets `NODE_ENV=development` inside a tree that has
+ * no `pino-pretty`, and pino would then fail to start the transport.
+ *
+ * A process that dies because a log *formatter* is missing has turned a cosmetic
+ * dependency into a fatal one. Checking resolvability keeps the failure cosmetic:
+ * no colours, same logs.
+ */
+function prettyAvailable(): boolean {
+  try {
+    // Resolved from the application root rather than `import.meta.url`: this
+    // file is transpiled to CJS in some entry points, where `import.meta` is a
+    // syntax error.
+    createRequire(`${process.cwd()}/`).resolve('pino-pretty');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function createRootLogger(): Logger {
   let level = 'info';
   let pretty = false;
   try {
     const cfg = env();
     level = cfg.LOG_LEVEL;
-    pretty = !cfg.isProduction && !cfg.isTest;
+    pretty = !cfg.isProduction && !cfg.isTest && prettyAvailable();
   } catch {
     // Fall through to defaults; a config error will be logged by the caller.
   }

@@ -282,6 +282,28 @@ export interface LeadFilters {
 export type LeadSortField =
   'opportunityScore' | 'rating' | 'reviewCount' | 'createdAt' | 'displayName';
 
+/**
+ * Escapes the SQL `LIKE` metacharacters in a user-supplied search term.
+ *
+ * Prisma's `contains`, `startsWith` and `endsWith` are not literal substring
+ * operators — they compile to `LIKE`, and the value is interpolated into the
+ * pattern. Prisma parameterises it, so there is no injection; but `%` and `_`
+ * inside that parameter are still read by `LIKE` as wildcards.
+ *
+ * The consequence is easy to underestimate. `_` matches ANY single character,
+ * so a search for `_` returns every lead, and a filter written as
+ * `startsWith: '__loadtest__'` matches names that merely have two characters
+ * where the underscores are. That is precisely how a scoped query silently
+ * becomes an unscoped one.
+ *
+ * PostgreSQL's `LIKE` uses backslash as its default escape character when no
+ * `ESCAPE` clause is given, which is what Prisma emits — so escaping the
+ * backslash first and then the two wildcards is sufficient and correct.
+ */
+export function escapeLike(term: string): string {
+  return term.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
 /** Builds the tenant-scoped where clause shared by list and export. */
 export function leadWhere(tenant: TenantContext, filters: LeadFilters): Prisma.BusinessWhereInput {
   const where: Prisma.BusinessWhereInput = { organizationId: tenant.organizationId };
@@ -326,10 +348,9 @@ export function leadWhere(tenant: TenantContext, filters: LeadFilters): Prisma.B
   if (filters.flags?.length) {
     where.opportunityFlags = { hasEvery: filters.flags };
   }
-  // Case-insensitive substring search over the display name only. Deliberately
-  // not a raw SQL LIKE built from user input.
+  // Case-insensitive substring search over the display name only.
   if (filters.search) {
-    where.displayName = { contains: filters.search, mode: 'insensitive' };
+    where.displayName = { contains: escapeLike(filters.search), mode: 'insensitive' };
   }
 
   return where;
