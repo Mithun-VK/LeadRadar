@@ -301,6 +301,16 @@ export interface QueueDepth {
   readonly completed: number;
   readonly paused: boolean;
   readonly deadLettered: number;
+  /**
+   * Age of the oldest job still waiting, in milliseconds. `null` when nothing is
+   * waiting.
+   *
+   * Depth alone cannot distinguish a deep queue that is draining quickly from a
+   * shallow one that has been stuck for an hour — and those have opposite
+   * remedies. Age can: a queue whose oldest job keeps getting older is not
+   * moving, whatever its depth says.
+   */
+  readonly oldestWaitingAgeMs: number | null;
 }
 
 /** Depth snapshot for the ops dashboard. */
@@ -317,10 +327,15 @@ export async function queueDepths(): Promise<QueueDepth[]> {
         'failed',
         'completed',
       );
-      const [paused, deadLettered] = await Promise.all([
+      const [paused, deadLettered, oldestWaiting] = await Promise.all([
         queue.isPaused(),
         getDeadLetterQueue(name).getJobCountByTypes('waiting', 'completed'),
+        // One job, at the tail of the waiting list — BullMQ keeps it in FIFO
+        // order, so index 0 is the oldest. A single fetch, not a scan.
+        queue.getWaiting(0, 0).catch(() => []),
       ]);
+
+      const queuedAt = oldestWaiting[0]?.timestamp ?? null;
 
       return {
         name,
@@ -331,6 +346,7 @@ export async function queueDepths(): Promise<QueueDepth[]> {
         completed: counts.completed ?? 0,
         paused,
         deadLettered,
+        oldestWaitingAgeMs: queuedAt === null ? null : Math.max(0, Date.now() - queuedAt),
       };
     }),
   );

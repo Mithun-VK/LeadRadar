@@ -38,6 +38,32 @@ const EXPORT_DIR = join(process.cwd(), 'exports');
 
 type LeadRow = Awaited<ReturnType<typeof fetchPage>>[number];
 
+/**
+ * One page of leads.
+ *
+ * OFFSET, deliberately, and this was measured rather than assumed.
+ *
+ * The theoretical objection is that a full export is quadratic: PostgreSQL
+ * produces and discards every row before the offset, so walking 50,000 rows in
+ * pages of 500 scans roughly 12.4 million rows to emit 50,000. That reasoning is
+ * sound and the conclusion is still wrong here.
+ *
+ * `npm run bench:pagination` with BENCH_ROWS=50000 — the export's own MAX_ROWS
+ * ceiling, so the worst case this code can ever meet:
+ *
+ *   OFFSET walk: 74,585ms for 50,000 rows
+ *   keyset walk: 71,517ms for 50,000 rows   (1.04×, inside the noise)
+ *
+ * Keyset was also *slower* per page at depth. The reason is that the sort leads
+ * with `opportunityScore DESC NULLS LAST` — nullable and non-unique — so a
+ * cursor cannot become a simple index seek, and both plans sort. The walk's cost
+ * is dominated by the `include` joins and row materialisation (~1.5ms/row), not
+ * by the offset scan at all.
+ *
+ * So the offset stays: it is not the bottleneck, and replacing it would add
+ * cursor semantics (rows shifting mid-walk) for no measured gain.
+ * `scripts/bench-pagination.ts` is the regression guard if that ever changes.
+ */
 async function fetchPage(tenant: TenantContext, filters: LeadFilters, skip: number) {
   return db().business.findMany({
     where: leadWhere(tenant, filters),

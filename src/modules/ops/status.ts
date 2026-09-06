@@ -47,6 +47,15 @@ export const THRESHOLDS = {
   /** Dead-lettered jobs before someone must inspect them. */
   deadLetterWarn: 10,
   /**
+   * How long the oldest waiting job may sit before the queue counts as stalled.
+   *
+   * 15 minutes, not 1: a delayed follow-up or a burst behind a rate limit can
+   * legitimately wait a while, and an alert that fires during normal operation
+   * is an alert an operator learns to ignore. Fifteen minutes of no movement is
+   * not normal for any queue here.
+   */
+  queueStalledMinutes: 15,
+  /**
    * Share of recent sends that failed before it is an alert.
    *
    * 20%, not 1%: individual sends fail for ordinary reasons (a bad address, a
@@ -268,6 +277,31 @@ export async function opsStatus(tenant: TenantContext): Promise<OpsStatus> {
         code: 'DEAD_LETTER',
         message: `Queue "${queue.name}" has ${queue.deadLettered} dead-lettered job(s).`,
         action: 'These exhausted their retries and need inspection; they will not retry on their own.',
+      });
+    }
+
+    /**
+     * A queue that is not moving, whatever its depth.
+     *
+     * Depth alerts miss the worst case entirely: three jobs that have sat for two
+     * hours never reach the backlog threshold, so a wedged queue with a shallow
+     * backlog produces no alert at all while nothing gets done. Age catches it,
+     * and age is the signal an operator actually reasons with — "the oldest job
+     * is two hours old" is immediately actionable in a way that "waiting: 3" is
+     * not.
+     */
+    if (
+      queue.oldestWaitingAgeMs !== null &&
+      queue.oldestWaitingAgeMs >= THRESHOLDS.queueStalledMinutes * 60_000
+    ) {
+      const minutes = Math.round(queue.oldestWaitingAgeMs / 60_000);
+      alerts.push({
+        severity: 'warning',
+        code: 'QUEUE_STALLED',
+        message: `Queue "${queue.name}" has a job that has been waiting ${minutes} minutes.`,
+        action:
+          'The queue is not draining. Check the worker is alive and not wedged on a long job — ' +
+          'depth alone would not have shown this.',
       });
     }
 

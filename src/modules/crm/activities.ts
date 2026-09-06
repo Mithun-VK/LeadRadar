@@ -205,6 +205,23 @@ export async function deleteActivity(tenant: TenantContext, activityId: string):
 }
 
 export async function listActivitiesForLead(tenant: TenantContext, businessId: string) {
+  /**
+   * Confirm the lead is ours before answering.
+   *
+   * The query below is already tenant-scoped, so another tenant's lead id
+   * returns an empty list and nothing leaks. But it returned **200** where every
+   * sibling resource route returns 404, which the cross-tenant penetration test
+   * flagged: a route that answers 200 for an id it does not own reads as
+   * success, and "success, no rows" is a different claim than "no such lead".
+   *
+   * Consistency, as defence in depth — not a fix for a live leak.
+   */
+  const lead = await db().business.findFirst({
+    where: { id: businessId, organizationId: tenant.organizationId },
+    select: { id: true },
+  });
+  if (!lead) throw notFound('Lead', { businessId });
+
   return db().salesActivity.findMany({
     where: { organizationId: tenant.organizationId, businessId },
     orderBy: [{ status: 'asc' }, { dueAt: 'asc' }, { createdAt: 'desc' }],
