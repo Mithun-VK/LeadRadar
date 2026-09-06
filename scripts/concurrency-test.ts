@@ -29,7 +29,7 @@
  * Mock email provider only, enforced. No pre-existing organization is written.
  *
  *   npm run test:concurrency
- *   CONCURRENCY=50 npm run test:concurrency
+ *   npm run test:concurrency -- --concurrency=50
  */
 import 'dotenv/config';
 
@@ -50,7 +50,23 @@ import { createDeal, moveDealStage, canMoveStage, type DealStage } from '@/modul
 import { listLeads } from '@/modules/database/repositories';
 import { SIGNALS_VERSION } from '@/modules/scoring/config';
 
-const CONCURRENCY = Number(process.env.CONCURRENCY ?? 25);
+/**
+ * A command-line knob.
+ *
+ * Deliberately `process.argv`, not `process.env`: the provider guard requires
+ * every `process.env` read to go through `env()`, and `env()` validates
+ * PRODUCTION configuration. A test-harness parameter has no business being
+ * declared there — adding it would make a benchmark knob a production config
+ * key. The existing load test reads its scale from argv for the same reason.
+ *
+ *   npm run <script> -- --name=value
+ */
+function arg(name: string): string | undefined {
+  const prefix = `--${name}=`;
+  return process.argv.slice(2).find((a) => a.startsWith(prefix))?.slice(prefix.length);
+}
+
+const CONCURRENCY = Number(arg('concurrency') ?? 25);
 const SLUG_A = '__concurrency__a';
 const SLUG_B = '__concurrency__b';
 
@@ -691,7 +707,26 @@ async function main(): Promise<void> {
   if (!workersBefore.alive) {
     assert('a worker is running to process the queue', false, 'no live heartbeat — start a worker');
   } else {
-    const beforeProcessed = workersBefore.workers.reduce((sum, w) => sum + w.processed, 0);
+    /**
+     * Drain first, then take the baseline.
+     *
+     * Section C enqueues a scoring job of its own, and it can complete inside
+     * this section's measurement window — which showed up as "31 for 30 jobs"
+     * and read like an off-by-one in the counters rather than in the test. An
+     * exact assertion is only meaningful over an interval that contains exactly
+     * the jobs it claims to.
+     */
+    const idleBy = Date.now() + 60_000;
+    while (Date.now() < idleBy) {
+      const counts = await scoreQueue.getJobCounts('waiting', 'active', 'delayed');
+      if ((counts.waiting ?? 0) + (counts.active ?? 0) === 0) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    // One more heartbeat interval, so the drained state is reflected in the beat.
+    await new Promise((r) => setTimeout(r, 16_000));
+
+    const baseline = await workerStatus();
+    const beforeProcessed = baseline.workers.reduce((sum, w) => sum + w.processed, 0);
     const hLeads = await Promise.all(
       Array.from({ length: 30 }, (_u, i) => makeLead(a, `qw-${i}`)),
     );

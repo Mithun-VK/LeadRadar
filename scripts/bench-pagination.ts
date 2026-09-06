@@ -15,16 +15,26 @@
  *   2. How much does keyset cost at the same depth?
  *   3. What does a full export cost each way?
  *
- * The conclusion the numbers supported, recorded in docs/LOAD_TEST_RESULTS.md:
- * the UI list keeps OFFSET (bounded page size, nobody walks to page 200, and the
- * API contract exposes `page`/`pageCount`), while the export switched to keyset,
- * because it walks EVERY page every time and is the one place where the
- * quadratic term is actually paid.
+ * The answer, at `--rows=50000` — the export's own MAX_ROWS ceiling, so the worst
+ * case this code can ever meet:
+ *
+ *   OFFSET walk: 74,585ms for 50,000 rows
+ *   keyset walk: 71,517ms for 50,000 rows    1.04×, inside the noise
+ *
+ * Keyset was also SLOWER per page at depth. The sort leads with
+ * `opportunityScore DESC NULLS LAST` — nullable and non-unique — so a cursor
+ * cannot become an index seek and both plans sort; and the walk is dominated by
+ * the include-joins at ~1.5ms/row, not by the offset scan.
+ *
+ * So nothing was rewritten. An earlier commit on this branch had switched the
+ * export to keyset on the theoretical argument alone; the measurement did not
+ * support it and the change was reverted. This script is the regression guard if
+ * that ever changes.
  *
  * Creates an isolated `__bench__` organization and deletes it afterwards.
  *
  *   npm run bench:pagination
- *   BENCH_ROWS=20000 npm run bench:pagination
+ *   npm run bench:pagination -- --rows=50000
  */
 import 'dotenv/config';
 
@@ -33,7 +43,23 @@ import { closeRedis } from '@/lib/redis';
 import { closeQueues } from '@/modules/jobs/queues';
 import { leadWhere, listLeads } from '@/modules/database/repositories';
 
-const ROWS = Number(process.env.BENCH_ROWS ?? 10_000);
+/**
+ * A command-line knob.
+ *
+ * Deliberately `process.argv`, not `process.env`: the provider guard requires
+ * every `process.env` read to go through `env()`, and `env()` validates
+ * PRODUCTION configuration. A test-harness parameter has no business being
+ * declared there — adding it would make a benchmark knob a production config
+ * key. The existing load test reads its scale from argv for the same reason.
+ *
+ *   npm run <script> -- --name=value
+ */
+function arg(name: string): string | undefined {
+  const prefix = `--${name}=`;
+  return process.argv.slice(2).find((a) => a.startsWith(prefix))?.slice(prefix.length);
+}
+
+const ROWS = Number(arg('rows') ?? 10_000);
 const PAGE_SIZE = 50;
 const EXPORT_PAGE_SIZE = 500;
 const SLUG = '__bench__pagination';

@@ -116,11 +116,44 @@ export async function closeRedis(): Promise<void> {
 }
 
 /** Liveness probe used by the health endpoint. */
+/**
+ * How long a health check may take before it answers "no".
+ *
+ * 3 seconds. A healthy PING is sub-millisecond locally and a few milliseconds
+ * across a region, so this is generous for any real deployment and far inside
+ * any sane probe timeout.
+ *
+ * The bound exists because the underlying client is deliberately patient:
+ * `maxRetriesPerRequest: 3` with a reconnect backoff that climbs to 5s, on top
+ * of a 10s connect timeout. Those are right for ordinary commands, which should
+ * ride out a blip rather than fail. They are wrong for a health check.
+ *
+ * Measured with the Redis container actually stopped: `redisHealthy()` took
+ * **67 seconds** to return false. A readiness probe that occupies a request for
+ * over a minute before admitting a dependency is down is not a health check —
+ * the load balancer sees a timeout instead of a 503, and the operator sees a
+ * hung endpoint instead of a diagnosis.
+ */
+const HEALTH_TIMEOUT_MS = 3_000;
+
 export async function redisHealthy(): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+
+  const timeout = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), HEALTH_TIMEOUT_MS);
+  });
+
+  // The ping's own rejection is swallowed here rather than left to race: once
+  // the timeout has won, an unhandled rejection would surface later as a crash
+  // in an unrelated tick.
+  const ping = cacheConnection()
+    .ping()
+    .then((reply) => reply === 'PONG')
+    .catch(() => false);
+
   try {
-    const reply = await cacheConnection().ping();
-    return reply === 'PONG';
-  } catch {
-    return false;
+    return await Promise.race([ping, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }

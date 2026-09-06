@@ -261,7 +261,15 @@ async function main(): Promise<void> {
     redisCheck.value === false || redisCheck.threw,
     `threw=${redisCheck.threw} value=${String(redisCheck.value)} after ${redisCheck.ms}ms`,
   );
-  assert('and it fails within a bounded time', redisCheck.ms < 30_000, `${redisCheck.ms}ms`);
+  /**
+   * Tight, because this is the assertion that found the bug.
+   *
+   * Measured at **67 seconds** before `redisHealthy()` was given its own
+   * timeout: the client's retry policy is deliberately patient for ordinary
+   * commands and that patience is wrong for a probe. 5s allows the 3s health
+   * timeout plus scheduling slack.
+   */
+  assert('and it fails within a bounded time', redisCheck.ms < 5_000, `${redisCheck.ms}ms`);
 
   assert(
     'LIVENESS still reports ok while Redis is down',
@@ -308,6 +316,28 @@ async function main(): Promise<void> {
    * "silently" is the word that matters: nothing in the application would report
    * a campaign whose next step simply never arrives.
    */
+  /**
+   * The QUEUE connection recovers separately from the cache one.
+   *
+   * It runs with `enableOfflineQueue: false` — deliberately, so BullMQ fails
+   * fast rather than silently buffering jobs against a dead connection — and it
+   * therefore rejects with "Stream isn't writeable" for a moment after the cache
+   * connection has already reported healthy. Reading it immediately aborted an
+   * earlier run of this drill.
+   *
+   * That gap is worth asserting rather than sleeping through: an operator
+   * watching `/api/health` sees green while the queue is still refusing work.
+   */
+  const queueBack = await waitFor(
+    () => getQueue(QUEUE_NAMES.scoring).getWaitingCount().then(() => true),
+    60_000,
+  );
+  assert(
+    'the queue connection also recovers, after the cache connection does',
+    queueBack !== null,
+    queueBack === null ? 'still refusing commands after 60s' : `${queueBack}ms behind the cache`,
+  );
+
   const queuedAfter = await getQueue(QUEUE_NAMES.scoring).getWaitingCount();
   const delayedAfter = await getQueue(QUEUE_NAMES.scoring).getDelayedCount();
   assert(

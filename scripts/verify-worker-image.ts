@@ -34,11 +34,11 @@
  *     -e REDIS_URL='redis://redis:6379' \
  *     leadradar-worker:verify
  *
- *   WORKER_CONTAINER_HOST=$(docker inspect -f '{{.Config.Hostname}}' leadradar-worker-verify) \
- *     npm run verify:worker-image
+ *   npm run verify:worker-image -- \
+ *     --container-host=$(docker inspect -f '{{.Config.Hostname}}' leadradar-worker-verify)
  *
- * `WORKER_CONTAINER_HOST` is the container's hostname — Docker sets it to the
- * short container id unless overridden.
+ * `--container-host` is the container's hostname — Docker sets it to the short
+ * container id unless overridden. `--jobs=N` sets how many jobs to enqueue.
  */
 import 'dotenv/config';
 
@@ -49,8 +49,22 @@ import { workerStatus, type WorkerBeat } from '@/modules/ops/heartbeat';
 import { SIGNALS_VERSION } from '@/modules/scoring/config';
 import { providers } from '@/modules/providers/registry';
 
-const CONTAINER_HOST = process.env.WORKER_CONTAINER_HOST;
-const JOB_COUNT = Number(process.env.WORKER_IMAGE_JOBS ?? 20);
+/**
+ * A command-line knob.
+ *
+ * Deliberately `process.argv`, not `process.env`: the provider guard requires
+ * every `process.env` read to go through `env()`, and `env()` validates
+ * PRODUCTION configuration. A test-harness parameter has no business being
+ * declared there — adding it would make a benchmark knob a production config
+ * key. The existing load test reads its scale from argv for the same reason.
+ */
+function arg(name: string): string | undefined {
+  const prefix = `--${name}=`;
+  return process.argv.slice(2).find((a) => a.startsWith(prefix))?.slice(prefix.length);
+}
+
+const CONTAINER_HOST = arg('container-host');
+const JOB_COUNT = Number(arg('jobs') ?? 20);
 const WAIT_MS = 60_000;
 
 const results: Array<{ label: string; pass: boolean; detail?: string }> = [];
@@ -73,8 +87,8 @@ async function containerBeat(): Promise<WorkerBeat | null> {
 async function main(): Promise<void> {
   if (!CONTAINER_HOST) {
     throw new Error(
-      'Set WORKER_CONTAINER_HOST to the container hostname:\n' +
-        "  WORKER_CONTAINER_HOST=$(docker inspect -f '{{.Config.Hostname}}' leadradar-worker-verify)",
+      'Pass --container-host=<hostname>:\n' +
+        "  npm run verify:worker-image -- --container-host=$(docker inspect -f '{{.Config.Hostname}}' leadradar-worker-verify)",
     );
   }
 
@@ -129,6 +143,7 @@ async function main(): Promise<void> {
   }
 
   const queue = getQueue(QUEUE_NAMES.scoring);
+  const failedBefore = await queue.getFailedCount();
   const runId = Date.now().toString(36);
 
   for (const [index, business] of businesses.entries()) {
@@ -173,8 +188,14 @@ async function main(): Promise<void> {
     `failed counter ${before.failed} → ${after?.failed ?? 'n/a'}`,
   );
 
+  // A delta, not an absolute: the scoring queue is shared and may already hold
+  // failures this verification did not cause.
   const failedCount = await queue.getFailedCount();
-  assert('the scoring queue has no failed jobs', failedCount === 0, `${failedCount} failed`);
+  assert(
+    'this batch added no failed jobs',
+    failedCount <= failedBefore,
+    `failed ${failedBefore} → ${failedCount}`,
+  );
 
   // -------------------------------------------------------------------------
   section('3. Idempotency across the queue boundary');
